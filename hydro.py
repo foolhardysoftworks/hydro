@@ -117,9 +117,6 @@ class _Property(object):
         self._index = _Property._counter
         _Property._counter += 1
 
-    def _client_get(self, resource):
-        return getattr(resource, self._name)
-
 
 class StaticProperty(_Property):
 
@@ -131,9 +128,6 @@ class StaticProperty(_Property):
         if resource is None:
             return self
         return copy.deepcopy(self._default_)
-
-    def _client_get(self, resource):
-        return self._default_
 
 
 class LinkedProperty(_Property):
@@ -161,18 +155,6 @@ class _TransientProperty(_Property):
         if not self._name in resource.__dict__:
             return copy.deepcopy(self._default_)
         return resource.__dict__[self._name]
-
-    def _client_get(self, resource):
-        return self._default_
-
-    def _client_set(self, resource, value):
-        if self._modifiable:
-            if not isinstance(value, list):
-                value = [value]
-            value = [self._validate(v) for v in value]
-            if not self._repeated:
-                value = value[0]
-            setattr(resource, self._name, value)
 
     def _validate(self, value):
         return value
@@ -268,7 +250,7 @@ class _Resource(object):
                 if property_._verbose_name:
                     prop_name = property_._verbose_name
                 d['properties'][prop_name] = pdict
-                pdict['value'] = property_._client_get(self)
+                pdict['value'] = getattr(self, property_._name)
                 pdict['style'] = property_._style.name
                 pdict['options'] = property_._style.options
 
@@ -608,10 +590,35 @@ class _RequestHandler(webapp2.RequestHandler):
             modify the resource.
     """
 
+    def get_current_user(self):
+        return AnonymousUser.create()
+
+    def get_modifications(self):
+
+        modifications = {}
+        for key, value in self.request.params.iteritems():
+            if key not in modifications:
+                modifications[key] = []
+            modifications[key].append(value)
+
+        if 'application/json' in self.request.headers['Content-Type']:
+            try:
+                json_modifications = json.loads(self.request.body)
+                if not isinstance(json_modifications, dict):
+                    raise TypeError
+            except:
+                pass
+            else:
+                for key, value in json_modifications.iteritems():
+                    if not isinstance(value, list):
+                        json_modifications[key] = [value]
+                modifications.update(json_modifications)
+
+        return modifications
+
     def dispatch(self):
 
         try:
-            print 's'
 
             if self.request.method not in self._allowed_methods:
                 raise HTTPException(405, "Method not allowed.")
@@ -623,8 +630,7 @@ class _RequestHandler(webapp2.RequestHandler):
                 raise HTTPException(400, "The requested resource could\
                 not be found.")
 
-            user = AnonymousUser.create()
-            modifications = {}  # STUB
+            user = self.get_current_user()
 
             resource = Resource.read(
                 name=self.request.route_kwargs.get('name'),
@@ -636,8 +642,21 @@ class _RequestHandler(webapp2.RequestHandler):
             resource._authorize(user)
 
             if self.request.method in self._modification_methods:
+                modifications = self.get_modifications()
                 for property_ in resource._properties_:
-                    if property_._name in modifications:
+                    if property_._verbose_name:
+                        name = property_._verbose_name
+                    else:
+                        name = property_._name
+                    if (property_._modifiable and name in modifications):
+                        value = modifications[name]
+                        if not isinstance(value, list):
+                            value = [value]
+                        value = [property_._validate(v) for v in value]
+                        if not self._repeated:
+                            value = value[0]
+                        setattr(resource, name, value)
+
                         property_._client_set(
                             resource,
                             modifications[property_._name]
