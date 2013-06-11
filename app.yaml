@@ -14,3 +14,4 @@ handlers:
 
 - url: /.*
   script: example.application
+  secure: always
