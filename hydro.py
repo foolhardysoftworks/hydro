@@ -553,6 +553,29 @@ class AnonymousUser(PersistentResource):
     )
 
 
+class Session(PersistentResource):
+
+    username = PersistentStringProperty()
+    password = PersistentStringProperty()
+
+    def create_hook(self, **kwargs):
+        pass
+
+
+class Login(TransientResource):
+
+    username = StringProperty()
+    password = StringProperty()
+
+    def client_update_hook(self, user):
+        user = User.read(self.username, create_name=False)
+        if user is None:
+            raise HTTPException(499, "No such user.")
+        if user.password != self.password:
+            raise HTTPException(499, "Wrong password.")
+        Session.create(username=self.username)
+
+
 class Hydro(webapp2.WSGIApplication):
     """The application."""
 
