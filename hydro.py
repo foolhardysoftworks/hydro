@@ -6,6 +6,10 @@ import copy
 import traceback
 import json
 import collections
+import os
+import datetime
+
+DEV = os.environ['SERVER_SOFTWARE'].startswith('Development')
 
 
 class _Style(object):
@@ -164,7 +168,11 @@ class StringProperty(_TransientProperty):
     pass
 
 
-class _PersistentProperty(_Property):
+class BooleanProperty(_TransientProperty):
+    pass
+
+
+class _StoredProperty(_Property):
     """Baseclass for stored properties."""
 
     _attributes = ['_name', '_indexed', '_repeated', '_verbose_name',
@@ -183,39 +191,39 @@ class _PersistentProperty(_Property):
         return value
 
 
-class PersistentStringProperty(_PersistentProperty, ndb.TextProperty):
+class StoredStringProperty(_StoredProperty, ndb.TextProperty):
     pass
 
 
-class PersistentFloatProperty(_PersistentProperty, ndb.FloatProperty):
+class StoredFloatProperty(_StoredProperty, ndb.FloatProperty):
     pass
 
 
-class PersistentIntegerProperty(_PersistentProperty, ndb.IntegerProperty):
+class StoredIntegerProperty(_StoredProperty, ndb.IntegerProperty):
     pass
 
 
-class PersistentBooleanProperty(_PersistentProperty, ndb.BooleanProperty):
+class StoredBooleanProperty(_StoredProperty, ndb.BooleanProperty):
     pass
 
 
-class PersistentDateTimeProperty(_PersistentProperty, ndb.DateTimeProperty):
+class StoredDateTimeProperty(_StoredProperty, ndb.DateTimeProperty):
 
-    _attributes = _PersistentProperty._attributes
+    _attributes = _StoredProperty._attributes
 
 
-class PersistentSerializedProperty(_PersistentProperty, ndb.JsonProperty):
+class StoredSerializedProperty(_StoredProperty, ndb.JsonProperty):
     pass
 
 
-class PersistentStructuredProperty(_PersistentProperty,
+class StoredStructuredProperty(_StoredProperty,
                                    ndb.StructuredProperty):
 
-    _attributes = _PersistentProperty._attributes
+    _attributes = _StoredProperty._attributes
 
     def __init__(self, resource_class, **kwargs):
         self._modelclass = resource_class
-        _PersistentProperty.__init__(self, **kwargs)
+        _StoredProperty.__init__(self, **kwargs)
 
 
 class _Resource(object):
@@ -260,6 +268,19 @@ class _Resource(object):
     def name(self):
         return self.key.string_id()
 
+    @staticmethod
+    def set_cookie(*args, **kwargs):
+        webapp2.get_request().response.set_cookie(*args, **kwargs)
+
+    @staticmethod
+    def get_cookie(key):
+        return webapp2.get_request().cookie.get(key)
+
+    def forward_to(self, uri=None):
+        if not uri:
+            uri = self.uri
+        webapp2.get_request().response.redirect(uri)
+
     style = Default()
     public_class_name = None
     perk = None
@@ -287,7 +308,7 @@ class TransientResource(_Resource):
     _public_class_mapping = {}
 
 
-class PersistentResource(_Resource, ndb.Model):
+class StoredResource(_Resource, ndb.Model):
 
     @property
     def uri(self):
@@ -295,7 +316,8 @@ class PersistentResource(_Resource, ndb.Model):
                                         self.name]))
 
     @classmethod
-    def create(cls, name=None, update=False, **kwargs):
+    def create(cls, name=None, update=False, modifications=None,
+               **kwargs):
         """Create a resource.
 
         Create a resource instance of the given class with the
@@ -326,6 +348,9 @@ class PersistentResource(_Resource, ndb.Model):
         if not name:
             name = cls.create_name(**kwargs)
         resource = cls(id=name)
+        if modifications:
+            for key in modifications:
+                setattr(resource, key, modifications[key])
         resource.create_hook(**kwargs)
         resource.update(externally=update, **kwargs)
         return resource
@@ -489,7 +514,7 @@ class PersistentResource(_Resource, ndb.Model):
                isinstance(prop_, ndb.ModelKey)):
                 prop_._fix_up(cls, name)
                 if (prop_._repeated or
-                    (isinstance(prop_, PersistentStructuredProperty) and
+                    (isinstance(prop_, StoredStructuredProperty) and
                      prop_._modelclass._has_repeated)):
                     cls._has_repeated = True
                 cls._properties[prop_._name] = prop_
@@ -508,13 +533,13 @@ class Collection(_Resource):
     _public_class_mapping = {}
 
 
-class _EncoderBase(PersistentResource):
+class _EncoderBase(StoredResource):
 
     @classmethod
     def create_name(self, resource, **kwargs):
         return resource.key.urlsafe()
 
-    value = PersistentStringProperty()
+    value = StoredStringProperty()
     _use_memcache = False
     _use_datastore = False
 
@@ -531,32 +556,32 @@ class _JSONEncoder(_EncoderBase):
         self.value = json.dumps(resource.to_dictionary(), indent=4)
 
 
-class User(PersistentResource):
+class User(StoredResource):
 
-    owner_perks = PersistentStringProperty(
+    owner_perks = StoredStringProperty(
         default=['owner'], repeated=True
     )
-    group_perks = PersistentSerializedProperty(default={})
-    other_perks = PersistentStringProperty(
+    group_perks = StoredSerializedProperty(default={})
+    other_perks = StoredStringProperty(
         default=['basic', 'user'], repeated=True,
     )
 
 
-class AnonymousUser(PersistentResource):
+class AnonymousUser(StoredResource):
 
-    owner_perks = PersistentStringProperty(
+    owner_perks = StoredStringProperty(
         default=[], repeated=True,
     )
-    group_perks = PersistentSerializedProperty(default={})
-    other_perks = PersistentStringProperty(
+    group_perks = StoredSerializedProperty(default={})
+    other_perks = StoredStringProperty(
         default=['basic'], repeated=True,
     )
 
 
-class Session(PersistentResource):
+class Session(StoredResource):
 
-    username = PersistentStringProperty()
-    password = PersistentStringProperty()
+    username = StoredStringProperty()
+    password = StoredStringProperty()
 
     def create_hook(self, **kwargs):
         pass
@@ -566,6 +591,9 @@ class Login(TransientResource):
 
     username = StringProperty()
     password = StringProperty()
+    persist = BooleanProperty()
+
+    target = StringProperty(default='/')
 
     def client_update_hook(self, user):
         user = User.read(self.username, create_name=False)
@@ -573,7 +601,18 @@ class Login(TransientResource):
             raise HTTPException(499, "No such user.")
         if user.password != self.password:
             raise HTTPException(499, "Wrong password.")
-        Session.create(username=self.username)
+        session = Session.create(
+            modifications={
+                'username': self.username,
+                'password': self.password,
+            }
+        )
+        self.set_cookie(
+            session.name,
+            secure=True if DEV else False,
+            expires=datetime.datetime(9999) if self.persist else None,
+        )
+        self.forward(target)
 
 
 class _Request(webapp2.Request):
@@ -594,7 +633,7 @@ class Hydro(webapp2.WSGIApplication):
             [
                 webapp2.Route('/', _RootHandler),
                 webapp2.Route('/<class_name>', _TransientHandler),
-                webapp2.Route('/<class_name>/<name>', _PersistentHandler),
+                webapp2.Route('/<class_name>/<name>', _StoredHandler),
                 webapp2.Route('/<class_name>/', _CollectionHandler),
                 webapp2.Route('<:.*>', _GarbageHandler),
             ],
@@ -623,9 +662,6 @@ class _RequestHandler(webapp2.RequestHandler):
             methods that when used, cause the request handler to
             modify the resource.
     """
-
-    def get_current_user(self):
-        return AnonymousUser.create()
 
     def get_modifications(self):
 
@@ -667,8 +703,8 @@ class _RequestHandler(webapp2.RequestHandler):
             user = self.request.get_current_user()
             if not isinstance(user, User) and not isinstance(user,
                AnonymousUser):
-                raise TypeError("User resource must be a subclass of\
-                User or AnonymousUser")
+                raise TypeError("User resource must subclassed from\
+                User or AnonymousUser.")
 
             resource = Resource.read(
                 name=self.request.route_kwargs.get('name'),
@@ -742,9 +778,9 @@ class _TransientHandler(_RequestHandler):
     _modification_methods = ['POST']
 
 
-class _PersistentHandler(_RequestHandler):
+class _StoredHandler(_RequestHandler):
     """Handler for requests for persistent resources."""
-    _resource_class = PersistentResource
+    _resource_class = StoredResource
 
 
 class _CollectionHandler(_RequestHandler):
