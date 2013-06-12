@@ -8,8 +8,12 @@ import json
 import collections
 import os
 import datetime
+import jinja2
 
 DEV = os.environ['SERVER_SOFTWARE'].startswith('Development')
+JINJA_ENVIRONMENT = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(os.path.dirname(__file__)),
+    extensions=['jinja2.ext.autoescape'])
 
 
 class _Style(object):
@@ -32,6 +36,9 @@ class _PropertyStyle(_Style): pass
 
 
 class Hidden(_PropertyStyle): pass
+
+
+class TextInput(_PropertyStyle): pass
 
 
 class _MetaResource(ndb.MetaModel):
@@ -547,7 +554,8 @@ class _EncoderBase(StoredResource):
 class _HTMLEncoder(_EncoderBase):
 
     def create_hook(self, resource, **kwargs):
-        self.value = '<b>James needs to make an HTML encoder.</b>'
+        template = JINJA_ENVIRONMENT.get_template('example.html')
+        self.value = template.render(resource.to_dictionary())
 
 
 class _JSONEncoder(_EncoderBase):
@@ -589,9 +597,9 @@ class Session(StoredResource):
 
 class Login(TransientResource):
 
-    username = StringProperty()
-    password = StringProperty()
-    persist = BooleanProperty()
+    username = StringProperty(style=TextInput())
+    password = StringProperty(style=TextInput())
+    persist = BooleanProperty(style=TextInput())
 
     target = StringProperty(default='/')
 
@@ -612,7 +620,10 @@ class Login(TransientResource):
             secure=True if DEV else False,
             expires=datetime.datetime(9999) if self.persist else None,
         )
-        self.forward(target)
+        self.forward_to('/')
+
+    public_class_name = 'login'
+    perk = 'basic'
 
 
 class _Request(webapp2.Request):

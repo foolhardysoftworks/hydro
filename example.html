@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Hydro</title>
+  </head>
+  <body>
+    {% for name, property in properties.iteritems() %}
+    <div class="{{ property.style }}">
+
+    {% if property.style == "textinput" %}
+    <input name={{ name }}>
+    {% endif %}
+
+    </div>
+    {% endfor %}
+  </body>
+</html>
