@@ -588,7 +588,7 @@ class Hydro(webapp2.WSGIApplication):
     def __init__(self, current_user_getter=None, **kwargs):
 
         if current_user_getter:
-            Hydro.get_current_user = current_user_getter
+            self.request_class.get_current_user = current_user_getter
 
         super(Hydro, self).__init__(
             [
@@ -664,7 +664,7 @@ class _RequestHandler(webapp2.RequestHandler):
                 raise HTTPException(400, "The requested resource could\
                 not be found.")
 
-            user = self.app.get_current_user()
+            user = self.request.get_current_user()
 
             resource = Resource.read(
                 name=self.request.route_kwargs.get('name'),
