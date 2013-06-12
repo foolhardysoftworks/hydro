@@ -665,6 +665,10 @@ class _RequestHandler(webapp2.RequestHandler):
                 not be found.")
 
             user = self.request.get_current_user()
+            if not isinstance(user, User) and not isinstance(user,
+               AnonymousUser):
+                raise TypeError("User resource must be a subclass of\
+                User or AnonymousUser")
 
             resource = Resource.read(
                 name=self.request.route_kwargs.get('name'),
