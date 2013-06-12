@@ -576,11 +576,17 @@ class Login(TransientResource):
         Session.create(username=self.username)
 
 
+class _Request(webapp2.Request):
+
+    def get_current_user(self):
+        return AnonymousUser.create()
+
+
 class Hydro(webapp2.WSGIApplication):
     """The application."""
 
     def __init__(self, current_user_getter=None, **kwargs):
-        
+
         if current_user_getter:
             Hydro.get_current_user = current_user_getter
 
@@ -598,9 +604,7 @@ class Hydro(webapp2.WSGIApplication):
             }.items() + kwargs.pop('config', {}).items()),
             **kwargs)
 
-    def get_current_user(self):
-        print 'A'
-        return AnonymousUser.create()
+    request_class = _Request
 
 
 class _RequestHandler(webapp2.RequestHandler):
