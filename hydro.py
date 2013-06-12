@@ -579,7 +579,10 @@ class Login(TransientResource):
 class Hydro(webapp2.WSGIApplication):
     """The application."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, current_user_getter=None, **kwargs):
+        
+        if current_user_getter:
+            Hydro.get_current_user = current_user_getter
 
         super(Hydro, self).__init__(
             [
@@ -594,6 +597,10 @@ class Hydro(webapp2.WSGIApplication):
                 'template_path': 'static/private/templates',
             }.items() + kwargs.pop('config', {}).items()),
             **kwargs)
+
+    def get_current_user(self):
+        print 'A'
+        return AnonymousUser.create()
 
 
 class _RequestHandler(webapp2.RequestHandler):
@@ -653,7 +660,7 @@ class _RequestHandler(webapp2.RequestHandler):
                 raise HTTPException(400, "The requested resource could\
                 not be found.")
 
-            user = self.get_current_user()
+            user = self.app.get_current_user()
 
             resource = Resource.read(
                 name=self.request.route_kwargs.get('name'),

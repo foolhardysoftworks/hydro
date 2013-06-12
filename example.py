@@ -1,4 +1,4 @@
-from hydro import Hydro, TransientResource, StringProperty, Hidden
+from hydro import Hydro, TransientResource, StringProperty, Hidden, AnonymousUser
 
 
 class Test3(TransientResource):
@@ -16,3 +16,5 @@ application = Hydro(
     config={
     }
 )
+
+
