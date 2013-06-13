@@ -1,5 +1,5 @@
 from hydro import Hydro, TransientResource, StringProperty, StoredResource
-from hydro import StoredStringProperty, HTTPException
+from hydro import StoredStringProperty, HTTPException, StaticProperty, LinkedProperty
 from collections import OrderedDict
 
 
@@ -34,15 +34,28 @@ class DogBreeder(TransientResource):
             raise HTTPException(499, "Sorry, we only have the\
             technology to produce poodles and chihuahuas.")
         Dog.create(source=self).redirect()
-        
 
 
 class Dog(StoredResource):
 
     public_class_name = 'dog'
 
+    heading = StaticProperty(
+        value="Woof woof woof!",
+        style='heading',
+    )
+    some_text = LinkedProperty(
+        attr_name='text_maker',
+        style='text',
+    )
+
     dogname = StoredStringProperty()
     breed = StoredStringProperty()
+
+    @property
+    def text_maker(self):
+        return "I am %s, your new %s." % (self.dogname.capitalize(),
+                                          self.breed)
 
 application = Hydro(
     config={

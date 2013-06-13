@@ -234,6 +234,9 @@ class _Resource(object):
     def _fix_up_properties(cls):
         pass
 
+    def authorize(self, user):
+        pass
+
     def client_authorize_hook(self, user):
         pass
 
@@ -276,15 +279,15 @@ class _Resource(object):
     def get_cookie(key):
         return webapp2.get_request().cookie.get(key)
 
-    def forward_to(self, uri=None):
+    def redirect(self, uri=None):
         if not uri:
             uri = self.uri
-        webapp2.get_request().response.redirect(uri)
+        webapp2.redirect(uri, abort=True)
 
     def _copy(self, source):
         for name in set(
                 [property_._name for property_ in self._properties_]
-        ).intersect(
+        ).intersection(
             set([property_._name for property_ in
                  source._properties_])):
             setattr(self, name, getattr(source, name))

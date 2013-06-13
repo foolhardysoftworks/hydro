@@ -74,7 +74,9 @@
 	 >
 	{{ property.options.label }}
       </label>
-      <select name="{{ resource.class }}{{ resource.name }}{{ name }}">
+      <select id="{{ resource.class }}{{ resource.name }}{{ name }}"
+	      name="{{ name }}"
+	      >
 	{% for option_name, option_text in 
 	property.options.choices.iteritems() %}
 	<option value="{{ option_name }}"
@@ -99,7 +101,17 @@
 	 >
 
 
+      {% elif property.style == 'text' %}
+      <p>{{ property.value }}</p>
+
+      {% elif property.style == 'heading' %}
+      <h2>{{ property.value }}</h2>
+
+
+
       {% endif %}     
+
+
 
      </div>
     {% endfor %}    
