@@ -249,7 +249,7 @@ class _Resource(object):
     def to_dictionary(self):
         d = collections.OrderedDict()
         d['name'] = self.name
-        d['class'] = self.public_class_name
+        d['class'] = self.public_name
         d['uri'] = self.uri
         d['style'] = self.style if self.style else 'default'
         d['options'] = self.options if self.options else {}
@@ -294,7 +294,7 @@ class _Resource(object):
 
     style = None
     options = None
-    public_class_name = None
+    public_name = None
 
 
 class TransientResource(_Resource):
@@ -305,7 +305,7 @@ class TransientResource(_Resource):
 
     @property
     def key(self):
-        return ndb.Key('%s:%s' % ('transient', self.public_class_name),
+        return ndb.Key('%s:%s' % ('transient', self.public_name),
                        'transient')
 
     def authorize(self, user):
@@ -313,7 +313,7 @@ class TransientResource(_Resource):
 
     @property
     def uri(self):
-        return self.public_class_name
+        return self.public_name
 
     _public_class_mapping = {}
 
@@ -322,7 +322,7 @@ class StoredResource(_Resource, ndb.Model):
 
     @property
     def uri(self):
-        return '%s%s' % ('/', '/'.join([self.public_class_name,
+        return '%s%s' % ('/', '/'.join([self.public_name,
                                         self.name]))
 
     @classmethod

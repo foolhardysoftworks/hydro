@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 class DogBreeder(TransientResource):
 
-    public_class_name = 'newdog'
+    public_name = 'newdog'
     style = 'form'
     options = dict(submit_text="Make the Dog")
 
@@ -38,7 +38,7 @@ class DogBreeder(TransientResource):
 
 class Dog(StoredResource):
 
-    public_class_name = 'dog'
+    public_name = 'dog'
 
     heading = StaticProperty(
         value="Woof woof woof!",
