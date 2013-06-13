@@ -164,6 +164,7 @@ class StringProperty(_TransientProperty):
         return bleach.clean(
             value,
             tags=['p', 'em'],
+            strip=True,
         )
 
 
@@ -280,6 +281,14 @@ class _Resource(object):
             uri = self.uri
         webapp2.get_request().response.redirect(uri)
 
+    def _copy(self, source):
+        for name in set(
+                [property_._name for property_ in self._properties_]
+        ).intersect(
+            set([property_._name for property_ in
+                 source._properties_])):
+            setattr(self, name, getattr(source, name))
+
     style = None
     options = None
     public_class_name = None
@@ -314,7 +323,8 @@ class StoredResource(_Resource, ndb.Model):
                                         self.name]))
 
     @classmethod
-    def create(cls, name=None, update=False, modifications=None,
+    def create(cls, name=None, update=True, modifications=None,
+               source=None,
                **kwargs):
         """Create a resource.
 
@@ -346,6 +356,8 @@ class StoredResource(_Resource, ndb.Model):
         if not name:
             name = cls.create_name(**kwargs)
         resource = cls(id=name)
+        if source:
+            resource._copy(source)
         if modifications:
             for key in modifications:
                 setattr(resource, key, modifications[key])
@@ -407,7 +419,9 @@ class StoredResource(_Resource, ndb.Model):
 
         return resource
 
-    def update(self, externally=True, modifications=None, **kwargs):
+    def update(self, externally=True, modifications=None, 
+               source=None,
+               **kwargs):
         """Save the resource.
 
         Modify the properties of the resource and save the resource to
@@ -429,6 +443,8 @@ class StoredResource(_Resource, ndb.Model):
         if modifications:
             for key, value in modifications.iteritems():
                 setattr(self, key, value)
+        if source:
+            self._copy(source)
         self._thread_cache[
             (self.__class__.__name__, self.key.id())
         ] = self
