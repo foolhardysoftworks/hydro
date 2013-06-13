@@ -8,7 +8,7 @@
     {% if resource.style == 'form' %}
     <form 
        action="{{ resource.options.target }}"
-       method="{{ resource.options.method|default('GET') }}"
+       method="{{ resource.options.method|default('POST') }}"
        >
     {% else %}
     <div class="{{ resource.style }}">
