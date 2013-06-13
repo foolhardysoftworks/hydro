@@ -9,6 +9,11 @@ import collections
 import os
 import datetime
 import jinja2
+import sys
+import bleach
+import markdown2
+
+
 
 DEV = os.environ['SERVER_SOFTWARE'].startswith('Development')
 JINJA_ENVIRONMENT = jinja2.Environment(
@@ -148,7 +153,18 @@ class _TransientProperty(_Property):
 
 
 class StringProperty(_TransientProperty):
-    pass
+
+    def __init__(self, do_markdown=False, **kwargs):
+        self._do_markdown = do_markdown
+        super(StringProperty, self).__init__(**kwargs)
+
+    def _validate(self, value):
+        if self._do_markdown:
+            value = markdown2.markdown(value)
+        return bleach.clean(
+            value,
+            tags=['p', 'em'],
+        )
 
 
 class BooleanProperty(_TransientProperty):
