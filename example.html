@@ -27,7 +27,7 @@
 	 id="{{ resource.class }}{{ resource.name }}{{ name }}"
 	 name="{{ name }}"
 	 placeholder="{{ property.options.placeholder }}"
-	 value="{{ property.options.initial_value }}"
+	 value="{{ property.value }}"
 	 >
 
 
@@ -66,6 +66,38 @@
 	 name="{{ name }}"
 	 {% if property.value %}checked{% endif %}
 	 >
+
+
+      {% elif property.style == 'select' %}
+      <label
+	 for="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 >
+	{{ property.options.label }}
+      </label>
+      <select name="{{ resource.class }}{{ resource.name }}{{ name }}">
+	{% for option_name, option_text in 
+	property.options.choices.iteritems() %}
+	<option value="{{ option_name }}"
+		{% if not option_name  %}
+		disabled
+		{% endif %}
+		{% if option_name == property.options.selected %}
+		selected
+		{% endif %}
+		>
+	  {{ option_text }}
+	</option>	
+	{% endfor %}
+      </select>
+
+      {% elif property.style == 'submit' %}
+      <input
+	 id="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 type="submit"
+	 name="{{ name }}"
+	 {% if property.value %}checked{% endif %}
+	 >
+
 
       {% endif %}     
 

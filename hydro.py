@@ -15,6 +15,7 @@ JINJA_ENVIRONMENT = jinja2.Environment(
     loader=jinja2.FileSystemLoader(os.path.dirname(__file__)),
     extensions=['jinja2.ext.autoescape'])
 
+
 class _MetaResource(ndb.MetaModel):
     """Meta-class for resources.
 
@@ -28,7 +29,6 @@ class _MetaResource(ndb.MetaModel):
 
     def __new__(meta, name, baseclasses, class_dictionary):
         cls = ndb.MetaModel.__new__(meta, name, baseclasses, class_dictionary)
-
 
         if cls.public_class_name:
             cls._public_class_mapping[cls.public_class_name] = cls
@@ -282,7 +282,6 @@ class TransientResource(_Resource):
 
     def authorize(self, user):
         pass
-
 
     @property
     def uri(self):
@@ -591,29 +590,6 @@ class _RequestHandler(webapp2.RequestHandler):
             modify the resource.
     """
 
-    def get_modifications(self):
-
-        modifications = {}
-        for key, value in self.request.params.iteritems():
-            if key not in modifications:
-                modifications[key] = []
-            modifications[key].append(value)
-
-        if 'application/json' in self.request.headers['Content-Type']:
-            try:
-                json_modifications = json.loads(self.request.body)
-                if not isinstance(json_modifications, dict):
-                    raise TypeError
-            except:
-                pass
-            else:
-                for key, value in json_modifications.iteritems():
-                    if not isinstance(value, list):
-                        json_modifications[key] = [value]
-                modifications.update(json_modifications)
-
-        return modifications
-
     def dispatch(self):
 
         try:
@@ -639,7 +615,26 @@ class _RequestHandler(webapp2.RequestHandler):
             resource.authorize(user)
 
             if self.request.method in self._modification_methods:
-                modifications = self.get_modifications()
+
+                modifications = {}
+                for key, value in self.request.params.iteritems():
+                    if key not in modifications:
+                        modifications[key] = []
+                    modifications[key].append(value)
+
+                if 'application/json' in self.request.headers['Content-Type']:
+                    try:
+                        json_modifications = json.loads(self.request.body)
+                        if not isinstance(json_modifications, dict):
+                            raise TypeError
+                    except:
+                        pass
+                    else:
+                        for key, value in json_modifications.iteritems():
+                            if not isinstance(value, list):
+                                json_modifications[key] = [value]
+                    modifications.update(json_modifications)
+
                 for property_ in resource._properties_:
                     if property_._verbose_name:
                         name = property_._verbose_name
@@ -653,6 +648,7 @@ class _RequestHandler(webapp2.RequestHandler):
                         if not property_._repeated:
                             value = value[0]
                         setattr(resource, name, value)
+
                 resource.client_update_hook(user)
 
             content_type = self.request.headers.get('Accept')
@@ -727,5 +723,3 @@ class _GarbageHandler(_RequestHandler):
             HTTPException(404, "The requested resource could not be\
             found.")
         )
-
-
