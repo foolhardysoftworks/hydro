@@ -33,7 +33,8 @@ class DogBreeder(TransientResource):
         if not self.breed in ['poodle', 'chihuahua']:
             raise HTTPException(499, "Sorry, we only have the\
             technology to produce poodles and chihuahuas.")
-        Dog.create(source=self)
+        Dog.create(source=self).redirect()
+        
 
 
 class Dog(StoredResource):
@@ -42,7 +43,6 @@ class Dog(StoredResource):
 
     dogname = StoredStringProperty()
     breed = StoredStringProperty()
-
 
 application = Hydro(
     config={
