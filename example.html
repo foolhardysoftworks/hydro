@@ -5,14 +5,29 @@
     <title>Hydro</title>
   </head>
   <body>
-    {% for name, property in properties.iteritems() %}
-    <div class="{{ property.style }}">
-
-    {% if property.style == "textinput" %}
-    <input name={{ name }}>
+    {% if resource.style == 'form' %}
+    <form 
+       action="{{ resource.options.target }}"
+       method="{{ resource.options.method|default('GET') }}"
+       >
+    {% else %}
+    <div class="{{ resource.style }}">
     {% endif %}
-
+    {% for name, property in resource.properties.iteritems() %}
+    <div class="{{ property.style }}">
+      {% if property.style == 'textinput' %}
+      <input 
+	 name="{{ name }}"
+	 placeholder="{{ property.options.placeholder }}"
+	 value="{{ property.options.initial_value }}"
+	 >
+      {% endif %}     
+     </div>
+    {% endfor %}    
+    {% if resource.style == 'form' %}
+    </form>
+    {% else %}
     </div>
-    {% endfor %}
+    {% endif %}   
   </body>
 </html>

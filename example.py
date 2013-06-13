@@ -1,4 +1,4 @@
-from hydro import Hydro, TransientResource, StringProperty, Hidden, AnonymousUser
+from hydro import Hydro, TransientResource, StringProperty, Style
 
 
 class Test3(TransientResource):
@@ -8,7 +8,7 @@ class Test3(TransientResource):
 
     test_prop = StringProperty(
         default="It works!",
-        style=Hidden(css_override=True),
+        style=Style(),
     )
 
 

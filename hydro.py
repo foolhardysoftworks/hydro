@@ -16,29 +16,14 @@ JINJA_ENVIRONMENT = jinja2.Environment(
     extensions=['jinja2.ext.autoescape'])
 
 
-class _Style(object):
+class Style(object):
 
-    @property
-    def name(self):
-        return self.__class__.__name__.lower()
+    name = 'default'
 
-    def __init__(self, **kwargs):
+    def __init__(self, name=None, **kwargs):
+        if name:
+            self.name = name
         self.options = kwargs
-
-
-class _ResourceStyle(_Style): pass
-
-
-class Default(_ResourceStyle): pass
-
-
-class _PropertyStyle(_Style): pass
-
-
-class Hidden(_PropertyStyle): pass
-
-
-class TextInput(_PropertyStyle): pass
 
 
 class _MetaResource(ndb.MetaModel):
@@ -116,7 +101,7 @@ class _Property(object):
 
         if default is not None:
             self._default_ = default
-        if isinstance(style, _PropertyStyle):
+        if isinstance(style, Style):
             self._style = style
         if modifiable is not None:
             self._modifiable = modifiable
@@ -224,7 +209,7 @@ class StoredSerializedProperty(_StoredProperty, ndb.JsonProperty):
 
 
 class StoredStructuredProperty(_StoredProperty,
-                                   ndb.StructuredProperty):
+                               ndb.StructuredProperty):
 
     _attributes = _StoredProperty._attributes
 
@@ -288,7 +273,7 @@ class _Resource(object):
             uri = self.uri
         webapp2.get_request().response.redirect(uri)
 
-    style = Default()
+    style = Style()
     public_class_name = None
     perk = None
 
@@ -555,7 +540,10 @@ class _HTMLEncoder(_EncoderBase):
 
     def create_hook(self, resource, **kwargs):
         template = JINJA_ENVIRONMENT.get_template('example.html')
-        self.value = template.render(resource.to_dictionary())
+        self.value = template.render({
+            'resource': resource.to_dictionary(),
+            'custom_template_directory': '',
+        })
 
 
 class _JSONEncoder(_EncoderBase):
@@ -597,9 +585,10 @@ class Session(StoredResource):
 
 class Login(TransientResource):
 
-    username = StringProperty(style=TextInput())
-    password = StringProperty(style=TextInput())
-    persist = BooleanProperty(style=TextInput())
+    username = StringProperty(style=Style('textinput'))
+    password = StringProperty(style=Style('textinput'))
+
+    persist = BooleanProperty()
 
     target = StringProperty(default='/')
 
@@ -622,6 +611,7 @@ class Login(TransientResource):
         )
         self.forward_to('/')
 
+    style = Style('form', method='POOP')
     public_class_name = 'login'
     perk = 'basic'
 
