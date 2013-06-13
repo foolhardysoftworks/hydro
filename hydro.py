@@ -267,7 +267,6 @@ class _Resource(object):
     style = None
     options = None
     public_class_name = None
-    perk = None
 
 
 class TransientResource(_Resource):
@@ -281,9 +280,9 @@ class TransientResource(_Resource):
         return ndb.Key('%s:%s' % ('transient', self.public_class_name),
                        'transient')
 
-    def _authorize(self, user):
-        if not self.perk in user.other_perks:
-            raise HTTPException(403, "Not authorized.")
+    def authorize(self, user):
+        pass
+
 
     @property
     def uri(self):
@@ -544,79 +543,10 @@ class _JSONEncoder(_EncoderBase):
         self.value = json.dumps(resource.to_dictionary(), indent=4)
 
 
-class User(StoredResource):
-
-    owner_perks = StoredStringProperty(
-        default=['owner'], repeated=True
-    )
-    group_perks = StoredSerializedProperty(default={})
-    other_perks = StoredStringProperty(
-        default=['basic', 'user'], repeated=True,
-    )
-
-
-class AnonymousUser(StoredResource):
-
-    owner_perks = StoredStringProperty(
-        default=[], repeated=True,
-    )
-    group_perks = StoredSerializedProperty(default={})
-    other_perks = StoredStringProperty(
-        default=['basic'], repeated=True,
-    )
-
-
-class Session(StoredResource):
-
-    username = StoredStringProperty()
-    password = StoredStringProperty()
-
-    def create_hook(self, **kwargs):
-        pass
-
-
-class Login(TransientResource):
-
-    username = StringProperty(style='textinput', default='')
-    password = StringProperty(
-        style='textinput',
-        default='',
-        placeholder='Hi there!'
-    )
-
-    persist = BooleanProperty()
-
-    redirect_uri = StringProperty(default='/')
-
-    def client_update_hook(self, user):
-        user = User.read(self.username, create_name=False)
-        if user is None:
-            raise HTTPException(499, "No such user.")
-        if user.password != self.password:
-            raise HTTPException(499, "Wrong password.")
-        session = Session.create(
-            modifications={
-                'username': self.username,
-                'password': self.password,
-            }
-        )
-        self.set_cookie(
-            session.name,
-            secure=True if DEV else False,
-            expires=datetime.datetime(9999) if self.persist else None,
-        )
-        self.forward_to(self.redirect_uri)
-
-    style = 'form'
-    options = dict(method='GET')
-    public_class_name = 'login'
-    perk = 'basic'
-
-
 class _Request(webapp2.Request):
 
     def get_current_user(self):
-        return AnonymousUser.create()
+        pass
 
 
 class Hydro(webapp2.WSGIApplication):
@@ -699,11 +629,6 @@ class _RequestHandler(webapp2.RequestHandler):
                 not be found.")
 
             user = self.request.get_current_user()
-            if not isinstance(user, User) and not isinstance(user,
-               AnonymousUser):
-                raise TypeError("User resource must subclassed from\
-                User or AnonymousUser.")
-
             resource = Resource.read(
                 name=self.request.route_kwargs.get('name'),
                 user=user,
@@ -711,7 +636,7 @@ class _RequestHandler(webapp2.RequestHandler):
             resource.client_read_hook(user)
 
             resource.client_authorize_hook(user)
-            resource._authorize(user)
+            resource.authorize(user)
 
             if self.request.method in self._modification_methods:
                 modifications = self.get_modifications()
@@ -725,14 +650,9 @@ class _RequestHandler(webapp2.RequestHandler):
                         if not isinstance(value, list):
                             value = [value]
                         value = [property_._validate(v) for v in value]
-                        if not self._repeated:
+                        if not property_._repeated:
                             value = value[0]
                         setattr(resource, name, value)
-
-                        property_._client_set(
-                            resource,
-                            modifications[property_._name]
-                        )
                 resource.client_update_hook(user)
 
             content_type = self.request.headers.get('Accept')
