@@ -1,4 +1,4 @@
-from hydro import Hydro, TransientResource, StringProperty, Style
+from hydro import Hydro, TransientResource, StringProperty
 
 
 class Test3(TransientResource):
@@ -8,7 +8,6 @@ class Test3(TransientResource):
 
     test_prop = StringProperty(
         default="It works!",
-        style=Style(),
     )
 
 

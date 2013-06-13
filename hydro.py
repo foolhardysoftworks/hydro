@@ -15,17 +15,6 @@ JINJA_ENVIRONMENT = jinja2.Environment(
     loader=jinja2.FileSystemLoader(os.path.dirname(__file__)),
     extensions=['jinja2.ext.autoescape'])
 
-
-class Style(object):
-
-    name = 'default'
-
-    def __init__(self, name=None, **kwargs):
-        if name:
-            self.name = name
-        self.options = kwargs
-
-
 class _MetaResource(ndb.MetaModel):
     """Meta-class for resources.
 
@@ -39,6 +28,7 @@ class _MetaResource(ndb.MetaModel):
 
     def __new__(meta, name, baseclasses, class_dictionary):
         cls = ndb.MetaModel.__new__(meta, name, baseclasses, class_dictionary)
+
 
         if cls.public_class_name:
             cls._public_class_mapping[cls.public_class_name] = cls
@@ -90,18 +80,18 @@ class _Property(object):
 
     _default_ = None
     _style = None
-    _modifiable = False
+    _modifiable = True
     _repeated = False
     _verbose_name = None
 
     _counter = 0
 
     def __init__(self, default=None, style=None, modifiable=None,
-                 repeated=None, verbose_name=None):
+                 repeated=None, verbose_name=None, **kwargs):
 
         if default is not None:
             self._default_ = default
-        if isinstance(style, Style):
+        if style is not None:
             self._style = style
         if modifiable is not None:
             self._modifiable = modifiable
@@ -109,6 +99,7 @@ class _Property(object):
             self._repeated = repeated
         if verbose_name is not None:
             self._verbose_name = verbose_name
+        self._options = kwargs
 
         self._index = _Property._counter
         _Property._counter += 1
@@ -240,8 +231,8 @@ class _Resource(object):
         d['name'] = self.name
         d['class'] = self.public_class_name
         d['uri'] = self.uri
-        d['style'] = self.style.name
-        d['options'] = self.style.options
+        d['style'] = self.style if self.style else 'default'
+        d['options'] = self.options if self.options else {}
         d['properties'] = collections.OrderedDict()
         for property_ in self._properties_:
             if property_._style:
@@ -251,8 +242,8 @@ class _Resource(object):
                     prop_name = property_._verbose_name
                 d['properties'][prop_name] = pdict
                 pdict['value'] = getattr(self, property_._name)
-                pdict['style'] = property_._style.name
-                pdict['options'] = property_._style.options
+                pdict['style'] = property_._style
+                pdict['options'] = property_._options
 
         return d
 
@@ -273,7 +264,8 @@ class _Resource(object):
             uri = self.uri
         webapp2.get_request().response.redirect(uri)
 
-    style = Style()
+    style = None
+    options = None
     public_class_name = None
     perk = None
 
@@ -585,12 +577,16 @@ class Session(StoredResource):
 
 class Login(TransientResource):
 
-    username = StringProperty(style=Style('textinput'))
-    password = StringProperty(style=Style('textinput'))
+    username = StringProperty(style='textinput', default='')
+    password = StringProperty(
+        style='textinput',
+        default='',
+        placeholder='Hi there!'
+    )
 
     persist = BooleanProperty()
 
-    target = StringProperty(default='/')
+    redirect_uri = StringProperty(default='/')
 
     def client_update_hook(self, user):
         user = User.read(self.username, create_name=False)
@@ -609,9 +605,10 @@ class Login(TransientResource):
             secure=True if DEV else False,
             expires=datetime.datetime(9999) if self.persist else None,
         )
-        self.forward_to('/')
+        self.forward_to(self.redirect_uri)
 
-    style = Style('form', method='POOP')
+    style = 'form'
+    options = dict(method='GET')
     public_class_name = 'login'
     perk = 'basic'
 
