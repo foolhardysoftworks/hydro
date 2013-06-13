@@ -15,16 +15,67 @@
     {% endif %}
     {% for name, property in resource.properties.iteritems() %}
     <div class="{{ property.style }}">
-      {% if property.style == 'textinput' %}
+
+
+      {% if property.style == 'input' %}
+      <label
+	 for="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 >
+	{{ property.options.label }}
+      </label>
       <input 
+	 id="{{ resource.class }}{{ resource.name }}{{ name }}"
 	 name="{{ name }}"
 	 placeholder="{{ property.options.placeholder }}"
 	 value="{{ property.options.initial_value }}"
 	 >
+
+
+      {% elif property.style == 'password' %}
+      <label
+	 for="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 >
+	{{ property.options.label }}
+      </label>
+      <input 
+	 id="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 type="password"
+	 name="{{ name }}"
+	 placeholder="{{ property.options.placeholder }}"
+	 value="{{ property.options.initial_value }}"
+	 >
+
+
+      {% elif property.style == 'checkbox' %}
+      <label
+	 for="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 >
+	{{ property.options.label }}
+      </label>
+      <input
+	 id="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 type="checkbox"
+	 name="{{ name }}"
+	 {% if property.value %}checked{% endif %}
+	 >
+
+      {% elif property.style == 'submit' %}
+      <input
+	 id="{{ resource.class }}{{ resource.name }}{{ name }}"
+	 type="submit"
+	 name="{{ name }}"
+	 {% if property.value %}checked{% endif %}
+	 >
+
       {% endif %}     
+
      </div>
     {% endfor %}    
     {% if resource.style == 'form' %}
+    <input
+       type="submit"
+       value="{{ resource.options.submit_text|default("Submit") }}"
+       >
     </form>
     {% else %}
     </div>
