@@ -1,20 +1,19 @@
-from hydro import Hydro, TransientResource, StringProperty, StoredResource
-from hydro import StoredStringProperty, HTTPException, StaticProperty, LinkedProperty
+import hydro
 from collections import OrderedDict
 
 
-class DogBreeder(TransientResource):
+class DogBreeder(hydro.TransientResource):
 
     public_name = 'newdog'
     style = 'form'
     options = dict(submit_text="Make the Dog")
 
-    dogname = StringProperty(
+    dogname = hydro.StringProperty(
         style='input',
         default='Rover',
         label="Name the dog:",
     )
-    breed = StringProperty(
+    breed = hydro.StringProperty(
         style='select',
         choices=OrderedDict([
             (None, "Please select a breed..."),
@@ -28,36 +27,36 @@ class DogBreeder(TransientResource):
 
     def client_update_hook(self, user=None):
         if not self.dogname:
-            raise HTTPException(499, "You must give the poor dog a\
+            raise hydro.HTTPException(499, "You must give the poor dog a\
             name!")
         if not self.breed in ['poodle', 'chihuahua']:
-            raise HTTPException(499, "Sorry, we only have the\
+            raise hydro.HTTPException(499, "Sorry, we only have the\
             technology to produce poodles and chihuahuas.")
         Dog.create(source=self).redirect()
 
 
-class Dog(StoredResource):
+class Dog(hydro.StoredResource):
 
     public_name = 'dog'
 
-    heading = StaticProperty(
+    heading = hydro.StaticProperty(
         value="Woof woof woof!",
         style='heading',
     )
-    some_text = LinkedProperty(
+    some_text = hydro.LinkedProperty(
         attr_name='text_maker',
         style='text',
     )
 
-    dogname = StoredStringProperty()
-    breed = StoredStringProperty()
+    dogname = hydro.StoredStringProperty()
+    breed = hydro.StoredStringProperty()
 
     @property
     def text_maker(self):
         return "I am %s, your new %s." % (self.dogname.capitalize(),
                                           self.breed)
 
-application = Hydro(
+application = hydro.Hydro(
     config={
     }
 )
