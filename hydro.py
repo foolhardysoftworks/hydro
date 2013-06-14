@@ -35,8 +35,8 @@ class _MetaResource(ndb.MetaModel):
     def __new__(meta, name, baseclasses, class_dictionary):
         cls = ndb.MetaModel.__new__(meta, name, baseclasses, class_dictionary)
 
-        if cls.public_class_name:
-            cls._public_class_mapping[cls.public_class_name] = cls
+        if cls.public_name:
+            cls._public_mapping[cls.public_name] = cls
 
         prop_names = [name_ for name_ in set(dir(cls)) if
                       isinstance(getattr(cls, name_), _Property)]
@@ -315,7 +315,7 @@ class TransientResource(_Resource):
     def uri(self):
         return self.public_name
 
-    _public_class_mapping = {}
+    _public_mapping = {}
 
 
 class StoredResource(_Resource, ndb.Model):
@@ -542,12 +542,12 @@ class StoredResource(_Resource, ndb.Model):
     _use_datastore = True
     _instance_cache = {}
     _thread_cache = local().__dict__
-    _public_class_mapping = {}
+    _public_mapping = {}
 
 
 class Collection(_Resource):
 
-    _public_class_mapping = {}
+    _public_mapping = {}
 
 
 class _EncoderBase(StoredResource):
@@ -633,7 +633,7 @@ class _RequestHandler(webapp2.RequestHandler):
                 raise HTTPException(405, "Method not allowed.")
 
             # Obtain the class of the requested resource.
-            Resource = self._resource_class._public_class_mapping.get(
+            Resource = self._resource_class._public_mapping.get(
                 self.request.route_kwargs.get('class_name'))
             if not Resource:
                 raise HTTPException(400, "The requested resource could\
@@ -741,9 +741,9 @@ class _CollectionHandler(_RequestHandler):
 class _RootHandler(_RequestHandler):
     """Handler for requests for the root resource."""
     def dispatch(self):
-        if '/' in TransientResource._public_class_mapping:
+        if '/' in TransientResource._public_mapping:
             self.__class__ = _TransientHandler
-        elif '/' in Collection._public_class_mapping:
+        elif '/' in Collection._public_mapping:
             self.__class__ = _CollectionHandler
         else:
             self.__class__ = _GarbageHandler
