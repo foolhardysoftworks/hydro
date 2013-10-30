@@ -1,334 +1,656 @@
-import webapp2
-from google.appengine.ext import ndb
-from threading import local
-import uuid
-import copy
-import traceback
-import json
-import collections
+"""The Hydro Appengine Framework
+
+The docstrings here are intended to serve as little bits of help for
+developers, not as documentation of the public API. Please see the
+associated README for information about how to *USE* Hydro.
+
+"""
+
+__version__ = 0.0
+
 import os
-import datetime
-import jinja2
-import sys
-import bleach
-import markdown2
+import traceback
+import copy
+import uuid
+import collections
+import inspect
+
+import webapp2
+import bleach  # Not included in GAE
+
+from xml.etree.ElementTree import Element, SubElement, tostring
+from base64 import urlsafe_b64encode
+
+from google.appengine.ext import ndb as _ndb
+from google.appengine.datastore.datastore_query import Cursor as _GAECursor
+from google.appengine.api.datastore_errors import BadValueError\
+    as _GAEBadValueError
+from google.appengine.ext import blobstore
+from google.appengine.api import images
+from google.appengine.ext.appstats import recording
+from google.appengine.api import mail as _mail
 
 
+_DEVELOPMENT = os.environ.get('SERVER_SOFTWARE', 'Dev').startswith('Dev')
+_BOOLEAN_FALSES = [False, 0, 'False', 'false', 'No', 'no', 'NO' ]
 
-DEV = os.environ['SERVER_SOFTWARE'].startswith('Development')
-JINJA_ENVIRONMENT = jinja2.Environment(
-    loader=jinja2.FileSystemLoader(os.path.dirname(__file__)),
-    extensions=['jinja2.ext.autoescape'])
+get_request = webapp2.get_request
 
+class _HTTPException(Exception):
+    """Exception with a message and HTTP status code.
 
-class _MetaResource(ndb.MetaModel):
-    """Meta-class for resources.
+    Raise an instance of this class (or the class itself) with an
+    appropriate HTTP status code when an error state is reached.
 
-    This meta-class serves several purposes: The first is to record
-    the public subclasses of the three major resource classes.  The
-    second is to record the properties of each resource in a list by
-    order of assignment.  The third is to record the name of the
-    resource's attribute where each property is stored on the
-    properties themselves.
-    """
-
-    def __new__(meta, name, baseclasses, class_dictionary):
-        cls = ndb.MetaModel.__new__(meta, name, baseclasses, class_dictionary)
-
-        if cls.public_name:
-            cls._public_mapping[cls.public_name] = cls
-
-        prop_names = [name_ for name_ in set(dir(cls)) if
-                      isinstance(getattr(cls, name_), _Property)]
-        [setattr(getattr(cls, name_), '_name', name_) for name_ in
-         prop_names]
-        cls._properties_ = [getattr(cls, name_) for name_ in prop_names]
-        cls._properties_ = sorted(cls._properties_, key=lambda prop_:
-                                  prop_._index)
-        return cls
-
-
-class HTTPException(Exception):
-    """Exception called with an HTTP status code and message.
+    See RFC2616 for a list of established HTTP status codes.
 
     Attributes:
-        code: A 4XX/5XX HTTP status code indicating the nature of the
-            error.  Should be an integer.
-        message: A string containing a short message describing the
-            nature of the error.
-    """
-    def __init__(self, code=500, message="An unknown error has occured."):
-        self.code = code
-        self.message = message
-
-
-class _Property(object):
-    """Base-class for all properties.
-
-    Properties are data containers for resources.
-
-    Attributes:
-        _default_: The default value of the property.
-        _display: The display object of the property.
-        _index: An integer indicating the order in which the
-            properties were initialized.
-        _repeated: A boolean indicating whether of not the value of
-            the property is a list of values. This value is assigned
-            by a subclass.
-        _name: The name of the resource's attribute where the property
-            was assigned.
-        _verbose_name: The name of the property as viewed by a client.
+        code: An integer corresponding to the HTTP status code that
+            best describes the error.
+        message: A short string describing the error.
 
     Class Attributes:
-        _counter: The number of properties that have been initialized.
+        message_map: A dictionary that maps status codes to messages.
+            When a message is not specified and an entry in this
+            dictionary exists for the given status code, the message
+            will be obtained from this dictionary.
     """
 
-    _default_ = None
-    _style = None
-    _modifiable = True
-    _repeated = False
-    _verbose_name = None
+    code = 500
+    message = "An unknown error has occured."
+
+    message_map = {
+        403: "Unauthorized",
+        404: "Resource Not Found",
+        499: "Unknown client error."
+    }
+
+    def __init__(self, code=None, message=None):
+        if code is not None:
+            self.code = code
+        if message is not None:
+            self.message = message
+        elif self.code in self.message_map:
+            self.message = self.message_map[self.code]
+
+
+class _Inherited(object):
+    def __init__(self, *args):
+        self.names = args
+
+    def get_value(self, entity):
+        for name in self.names:
+            if isinstance(entity, dict):
+                entity = entity[name]
+            else:
+                entity = getattr(entity, name)
+        return entity
+
+
+class _Localized(object):
+    def __init__(self, id):
+        self.id = id
+
+
+class _Field(object):
+
+    """Data container for Models and Views.
+
+    Note that fields are attached to a model or view by the model/view
+    metaclass; see "_PseudoField".
+
+    """
+
+    _tag = None
+    _multivalued = False
+    _indexed = False
+    _indexable = False
+    _modifiable = False
+    _pass_name = False
+    _fixed_metadata = None
+
+    _name = None
+    _parent_class = None
 
     _counter = 0
 
-    def __init__(self, default=None, style=None, modifiable=None,
-                 repeated=None, verbose_name=None, **kwargs):
+    def __init__(self,
+                 default=None,
+                 tag=None,
+                 multivalued=None,
+                 indexed=None,
+                 metadata=None,
+                 **kwargs):
+        self._default_ = default
+        if tag is not None:
+            self._tag = tag
+        if multivalued is not None:
+            self._multivalued = multivalued
+        if indexed is not None:
+            self._indexed = indexed
+        if not self._indexable:
+            self._indexed = False
+        self._metadata = {}
+        if metadata is not None:
+            self._metadata.update(metadata)
+        self._metadata.update(kwargs)
+        if self._fixed_metadata is not None:
+            self._metadata.update(self._fixed_metadata)
+        self._index = self._counter
+        _Field._counter += 1
 
-        if default is not None:
-            self._default_ = default
-        if style is not None:
-            self._style = style
-        if modifiable is not None:
-            self._modifiable = modifiable
-        if repeated is not None:
-            self._repeated = repeated
-        if verbose_name is not None:
-            self._verbose_name = verbose_name
-        self._options = kwargs
-
-        self._index = _Property._counter
-        _Property._counter += 1
-
-
-class StaticProperty(_Property):
-
-    def __init__(self, modifiable=None, value=None, **kwargs):
-        kwargs['default'] = value
-        super(StaticProperty, self).__init__(**kwargs)
-
-    def __get__(self, resource, _=None):
-        if resource is None:
+    def __get__(self, parent, _=None):
+        if parent is None:
             return self
-        return copy.deepcopy(self._default_)
-
-
-class LinkedProperty(_Property):
-
-    def __init__(self, attr_name, modifiable=None, **kwargs):
-        self._attr_name = attr_name
-        super(LinkedProperty, self).__init__(**kwargs)
-
-    def __get__(self, resource, _=None):
-        if resource is None:
-            return self
-        return getattr(resource, self._attr_name)
-
-
-class _TransientProperty(_Property):
-    """Base class for transient properties.
-
-    The value of a transient property only persists for a single request.
-
-    """
-
-    def __get__(self, resource, _=None):
-        if resource is None:
-            return self
-        if not self._name in resource.__dict__:
-            return copy.deepcopy(self._default_)
-        return resource.__dict__[self._name]
-
-    def _validate(self, value):
+        if self._name in parent.__dict__:
+            value = parent.__dict__[self._name]
+        else:
+            value = copy.deepcopy(self._default_)
+        if self._multivalued:
+            if value is None:
+                return []
+            if not isinstance(value, (list, tuple)):
+                return [value]
         return value
 
 
-class StringProperty(_TransientProperty):
+class _Static(_Field):
+    """Field with a fixed value."""
 
-    def __init__(self, do_markdown=False, **kwargs):
-        self._do_markdown = do_markdown
-        super(StringProperty, self).__init__(**kwargs)
+    def __get__(self, parent, _=None):
+        if parent is None:
+            return self
+        return self._default_
 
-    def _validate(self, value):
-        if self._do_markdown:
-            value = markdown2.markdown(value)
-        return bleach.clean(
-            value,
-            tags=['p', 'em'],
-            strip=True,
+
+class _Meta(_Static):
+    pass
+
+
+class _Computed(_Field):
+    """Field with a value computed by the Model/View."""
+
+    def __get__(self, parent, _=None):
+        if parent is None:
+            return self
+        return getattr(parent, self._default_)()
+
+
+class _StandardField(_Field):
+
+    _indexable = True
+    _modifiable = True
+    _ndb_class = None
+
+    def __init__(self, *args, **kwargs):
+        _Field.__init__(self, *args, **kwargs)
+        self._ndb_class.__init__(
+            self,
+            indexed=self._indexed,
+            repeated=self._multivalued,
         )
 
-
-class BooleanProperty(_TransientProperty):
-    pass
-
-
-class _StoredProperty(_Property):
-    """Baseclass for stored properties."""
-
-    _attributes = ['_name', '_indexed', '_repeated', '_verbose_name',
-                   '_default_', '_style', '_modifiable']
-
-    def __init__(self, **kwargs):
-        ndb.Property.__init__(self)
-        _Property.__init__(self, **kwargs)
-
-    def __get__(self, resource, _=None):
-        if resource is None:
-            return self
-        value = self._get_value(resource)
-        if value is None or (self._repeated and value == []):
-            value = copy.deepcopy(self._default_)
+    def _coerce(self, value):
         return value
 
+    def _coerce_filter_value(self, value):
+        return self._coerce(value)
 
-class StoredStringProperty(_StoredProperty, ndb.TextProperty):
-    pass
+    def __set__(self, parent, value):
+        if isinstance(parent, _Model):
+            self._ndb_class.__set__(self, parent, value)
+        else:
+            parent.__dict__[self._name] = value
 
-
-class StoredFloatProperty(_StoredProperty, ndb.FloatProperty):
-    pass
-
-
-class StoredIntegerProperty(_StoredProperty, ndb.IntegerProperty):
-    pass
-
-
-class StoredBooleanProperty(_StoredProperty, ndb.BooleanProperty):
-    pass
-
-
-class StoredDateTimeProperty(_StoredProperty, ndb.DateTimeProperty):
-
-    _attributes = _StoredProperty._attributes
-
-
-class StoredSerializedProperty(_StoredProperty, ndb.JsonProperty):
-    pass
+    def __get__(self, parent, _=None):
+        if parent is None:
+            return self
+        elif isinstance(self, _ndb.Property) and isinstance(parent, _Model):
+            value = self._get_value(parent)
+            if value is None:
+                return super(_StandardField, self).__get__(parent, _)
+            return value
+        else:
+            return super(_StandardField, self).__get__(parent, _)
 
 
-class StoredStructuredProperty(_StoredProperty,
-                               ndb.StructuredProperty):
-
-    _attributes = _StoredProperty._attributes
-
-    def __init__(self, resource_class, **kwargs):
-        self._modelclass = resource_class
-        _StoredProperty.__init__(self, **kwargs)
+_Input = _StandardField
 
 
-class _Resource(object):
+class _BlobInput(_StandardField):
 
-    __metaclass__ = _MetaResource
+    def _coerce(self, value):
+        return blobstore.parse_blob_info(value)
+
+
+class _String(_StandardField, _ndb.StringProperty):
+    """View field whose value is a string."""
+
+    _ndb_class = _ndb.StringProperty
+
+    def __init__(self, *args, **kwargs):
+        self._STRIP_ = kwargs.get('_STRIP_', True)
+        _StandardField.__init__(self, *args, **kwargs)
+
+    def _coerce(self, value):
+        value = unicode(value)
+        value = "".join(c for c in value if ord(c) > 31)
+        if self._STRIP_:
+            return bleach.clean(value, strip=True)
+        return value
+
+    def _coerce_filter_value(self, value):
+        return str(value)
+
+_StringInput = _String
+
+class _Boolean(_StandardField, _ndb.BooleanProperty):
+    """A field whose value is True or False."""
+
+    _ndb_class = _ndb.BooleanProperty
+
+    def _coerce(self, value):
+        return value not in _BOOLEAN_FALSES
+
+_BooleanInput = _Boolean
+
+class _Float(_StandardField, _ndb.FloatProperty):
+    """View field whose value is a float."""
+
+    _ndb_class = _ndb.FloatProperty
+
+    def _coerce(self, value):
+        return float(value)
+
+_FloatInput = _Float
+
+class _Integer(_StandardField, _ndb.IntegerProperty):
+    """A Model field whose value is an integer."""
+
+    _ndb_class = _ndb.IntegerProperty
+
+    def _coerce(self, value):
+        return long(value)
+
+_IntegerInput = _Integer
+
+
+
+class _Serial(_StandardField, _ndb.JsonProperty):
+    
+    _ndb_class = _ndb.JsonProperty
+
+
+class _NestedModel(_ndb.StructuredProperty, _Field):
+
+    def __init__(self, model, **kwargs):
+        self._model = model
+        _Field.__init__(self, **kwargs)
+        _ndb.StructuredProperty.__init__(self, model, **kwargs)
+
+
+class _SerialNestedModel(_ndb.LocalStructuredProperty, _Field):
+
+#    def validate(*args, **kwargs):
+#        return 
+
+    def __init__(self, model, multivalued=False, **kwargs):
+        self._model = model
+        _Field.__init__(self, multivalued=multivalued, **kwargs)
+        _ndb.LocalStructuredProperty.__init__(
+            self, model, repeated=multivalued, **kwargs)
+
+
+class _NestedView(_Field):
+
+    def __init__(self, view, **kwargs):
+        self._view = view
+        super(_NestedView, self).__init__(**kwargs)
+
+
+class _Filter(_Field):
+    """Transient property whose value is a filter for queries."""
+
+    def __init__(self, field, default=None, operator=None,
+                 ignore_unset=True, modifiable=True, **kwargs):
+        super(_Filter, self).__init__(default, **kwargs)
+        self._field = field
+        if operator == '<':
+            self._operator = '__lt__'
+        elif operator == '<=':
+            self._operator = '__le__'
+        elif operator == '>':
+            self._operator = '__gt__'
+        elif operator == '>=':
+            self._operator = '__ge__'
+        else:
+            self._operator = '__eq__'
+        self._ignore_unset = ignore_unset
+        self._modifiable = modifiable
+
+    def _coerce(self, value):
+        try:
+            return self._field._coerce_filter_value(value)
+        except (TypeError, AttributeError):
+            pass
+
+
+class _Page(_Field):
+    """Field whose value is a GAE cursor."""
+    def _coerce(self, value):
+        try:
+            return _GAECursor(urlsafe=value)
+        except _GAEBadValueError:
+            raise ValueError
+
+
+class _MetaBase(type):
+
+    def __init__(cls, name, bases, cdict):
+
+        super(_MetaBase, cls).__init__(name, bases, cdict)
+        cls._fields = collections.OrderedDict()
+        for cls_ in bases:
+            cls._fields.update(
+                getattr(cls_, '_fields', collections.OrderedDict()))
+
+        fl = []
+        for name_ in set(dir(cls)):
+            value = getattr(cls, name_)
+            if isinstance(value, _Field):
+                value._name = name_
+                value._parent_class = cls
+                fl.append(value)
+
+        fl = sorted(fl, key=lambda x: x._index)
+        for field in fl:
+            cls._fields[field._name] = field
+
+
+class _MetaView(_MetaBase):
+    def __init__(cls, name, bases, cdict):
+        path = cdict.get('path')
+        if path:
+            cls._mapping[path.lower()] = cls
+        super(_MetaView, cls).__init__(name, bases, cdict)
+
+
+class _ViewAndModelBase(object):
+
+    _as_dictionary = None
+
+    def _internal_dictionary_hook(self):
+        pass
+
+    @property
+    def as_dictionary(self):
+        if self._as_dictionary is not None:
+            return self._as_dictionary
+        self._as_dictionary = dict()
+        if getattr(self, 'tag', None):
+            self._as_dictionary['tag'] = self.tag
+        elif self.path:
+            self._as_dictionary['tag'] = self.path
+        else:
+            self._as_dictionary['tag'] = self.__class__.__name__.lower()
+        if self._as_dictionary['tag'] == '/':
+            self._as_dictionary['tag'] = 'front_page'
+        self._as_dictionary['value'] = str()
+        self._as_dictionary['contents'] = []
+        self._as_dictionary['metadata'] = {}
+        for name, field in self._fields.iteritems():
+            if isinstance(field, _Meta):
+                self._as_dictionary['metadata'][name] = getattr(self, name)
+                continue
+            d = dict()
+            d['tag'] = field._tag if field._tag else field._name
+            d['value'] = getattr(self, name)
+            d['contents'] = []
+            d['metadata'] = {}
+            d['metadata'].update(field._metadata)
+            for key in d['metadata']:
+                if isinstance(d['metadata'][key], _Inherited):
+                    d['metadata'][key] = d['metadata'][key].get_value(
+                        self.entity)
+                if isinstance(d['metadata'][key], _Localized):
+                    pass
+            if field._pass_name:
+                d['metadata']['name'] = field._name
+            if isinstance(d['value'], (_View, _Model)):
+                r = d['value'].as_dictionary
+                d['value'] = str()
+                d['contents'] = r['contents']
+                d['metadata'].update(r['metadata'])
+            if isinstance(d['value'], _Inherited):
+                d['value'] = d['value'].get_value(self.entity)
+            self._as_dictionary['contents'].append(d)
+        for key in self._as_dictionary['metadata']:
+            if isinstance(self._as_dictionary['metadata'][key], _Inherited):
+                d['metadata'][key].get_value(self.entity)
+        self._internal_dictionary_hook()
+        return self._as_dictionary
+
+    @staticmethod
+    def create_blobstore_upload_url(path):
+        return blobstore.create_upload_url(path)
+
+    @staticmethod
+    def create_blobstore_image_url(blobinfo, **kwargs):
+        return images.get_serving_url(blobinfo, **kwargs)
+
+    @property
+    def remote_address(self):
+        return webapp2.get_request().remote_addr
+
+
+class _ViewBase(_ViewAndModelBase):
+
+    _mapping = {}
+    path = None
+    template = "index.html"
 
     @classmethod
-    def _fix_up_properties(cls):
+    def create(cls, *args, **kwargs):
+        return cls(*args, **kwargs)
+
+    def _internal_read_hook(self):
+        self.on_read()
+
+    def _internal_pre_modify_hook(self):
         pass
 
-    def authorize(self, user):
+    def _internal_post_modify_hook(self):
+        self.on_submit()
+
+    def on_submit(self):
         pass
 
-    def client_authorize_hook(self, user):
+    def on_read(self):
         pass
 
-    def client_read_hook(self, user):
-        pass
+    def redirect(self, view_or_string, resource=None):
+        if isinstance(view_or_string, basestring):
+            webapp2.redirect(view_or_string, abort=True)
+        url = '/' + view_or_string.path
+        if resource:
+            url = url + '/' + resource.id
+        webapp2.redirect(url, abort=True)
 
-    def client_update_hook(self, user):
-        pass
 
-    def to_dictionary(self):
-        d = collections.OrderedDict()
-        d['name'] = self.name
-        d['class'] = self.public_name
-        d['uri'] = self.uri
-        d['style'] = self.style if self.style else 'default'
-        d['options'] = self.options if self.options else {}
-        d['properties'] = collections.OrderedDict()
-        for property_ in self._properties_:
-            if property_._style:
-                pdict = collections.OrderedDict()
-                prop_name = property_._name
-                if property_._verbose_name:
-                    prop_name = property_._verbose_name
-                d['properties'][prop_name] = pdict
-                pdict['value'] = getattr(self, property_._name)
-                pdict['style'] = property_._style
-                pdict['options'] = property_._options
+class _View(_ViewBase):
 
+    __metaclass__ = _MetaView
+
+    path = None
+    model = None
+    _resource_id = None
+    _resource = None
+
+    def __init__(self, resource=None, resource_id=None):
+        if isinstance(resource, basestring):
+            resource_id = resource
+            resource = None
+        if resource_id is not None:
+            self._resource_id = resource_id
+        if resource is not None:
+            self._resource_id = resource.key.urlsafe()
+            self._resource = resource
+        for name, field in self._fields.iteritems():
+            if isinstance(field, _NestedView):
+                if field._multivalued:
+                    setattr(self, name, [])
+                else:
+                    subview = field._view(
+                        resource_id=self._resource_id)
+                    subview.model = self.model
+                    setattr(self, name, subview)
+
+    def prime(self):
+        if self.model and self._resource_id and not self._resource:
+            self.model.prime(self._resource_id)
+
+    @property
+    def entity(self):
+        return self.resource
+
+    @property
+    def resource(self):
+        if not self._resource:
+            if not self.model or not self._resource_id:
+                raise HTTPException(404)
+            self._resource = self.model.read(self._resource_id)
+        if not self._resource:
+            raise HTTPException(404)
+        return self._resource
+
+    @property
+    def as_dictionary(self):
+        if self._as_dictionary is not None:
+            return self._as_dictionary
+        d = super(_View, self).as_dictionary
+        if self._resource_id:
+            d['metadata']['id'] = self.resource.id
         return d
 
-    @property
-    def name(self):
-        return self.key.string_id()
 
-    @staticmethod
-    def set_cookie(*args, **kwargs):
-        webapp2.get_request().response.set_cookie(*args, **kwargs)
+class _Collection(_ViewBase):
 
-    @staticmethod
-    def get_cookie(key):
-        return webapp2.get_request().cookie.get(key)
+    __metaclass__ = _MetaView
 
-    def redirect(self, uri=None):
-        if not uri:
-            uri = self.uri
-        webapp2.redirect(uri, abort=True)
+    view = None
 
-    def _copy(self, source):
-        for name in set(
-                [property_._name for property_ in self._properties_]
-        ).intersection(
-            set([property_._name for property_ in
-                 source._properties_])):
-            setattr(self, name, getattr(source, name))
+    def _internal_read_hook(self):
+        pass
 
-    style = None
-    options = None
-    public_name = None
+    def _internal_pre_modify_hook(self):
+        pass
 
+    def _internal_post_modify_hook(self):
+        self.on_read()
 
-class TransientResource(_Resource):
-
-    @classmethod
-    def read(cls, *args, **kwargs):
-        return cls()
-
-    @property
-    def key(self):
-        return ndb.Key('%s:%s' % ('transient', self.public_name),
-                       'transient')
-
-    def authorize(self, user):
+    def invalidate_cache(self):
+        # destroy first page in memcache to force new query results
+        # needs something to generate the query without executing it
         pass
 
     @property
-    def uri(self):
-        return self.public_name
+    def results(self):
+        if self._results is None:
+            self._execute_query()
+        return self._results
 
-    _public_mapping = {}
+    _results = None
+    _next_page = None
 
-
-class StoredResource(_Resource, ndb.Model):
+    directions = []
+    page = _Page()
+    results_per_page = 10
 
     @property
-    def uri(self):
-        return '%s%s' % ('/', '/'.join([self.public_name,
-                                        self.name]))
+    def as_dictionary(self):
+        if self._as_dictionary is not None:
+            return self._as_dictionary
+        d = super(_Collection, self).as_dictionary
+        d['tag'] = 'collection'
+        d['contents'] = []
+        for view in self.results:
+            d['contents'].append(view.as_dictionary)
+        self._internal_dictionary_hook()
+        return self._as_dictionary
+
+    def _execute_query(self):
+        self._results = []
+        if not self.view or not self.view.model:
+            return
+        query = self.view.model.query()
+        for name, field in self._fields.iteritems():
+            if isinstance(field, _Filter):
+                value = getattr(self, name)
+                if value is not None or not field._ignore_unset:
+                    model_field = field._field
+                    try:
+                        value = model_field._coerce_filter_value(value)
+                    except (TypeError, ValueError):
+                        value = None
+                    operator = getattr(model_field, field._operator)(value)
+                    query = query.filter(operator)
+        print query
+        directions = self.directions
+        if not (isinstance(directions, list) or isinstance(directions,
+                                                           tuple)):
+            directions = [directions]
+        for direction in directions:
+            if direction:
+                query = query.order(direction)
+        print query
+        resources, next_cursor, _ = query.fetch_page(
+            self.results_per_page,
+            start_cursor=self.page)
+        print resources
+        views = []
+        for resource in resources:
+            resource.on_read()
+            for name, field in resource._fields.iteritems():
+                if isinstance(field, (_NestedModel, _SerialNestedModel)):
+                    if not field._multivalued:
+                        setattr(resource, name, field._model.create())
+            if resource._use_instance_cache:
+                self._instance_cache[resource.key.urlsafe()] = resource
+            resource.put(use_memcache=False, use_datastore=False)
+            views.append(self.view(resource=resource))
+        for view in views:
+            view.on_read()
+
+        self._results = views
+        if next_cursor:
+            self._next_page = next_cursor.urlsafe()
+
+
+class _MetaModel(_ndb.MetaModel, _MetaBase):
+    def __init__(cls, name, bases, cdict):
+        super(_ndb.MetaModel, cls).__init__(name, bases, cdict)
+        super(_MetaBase, cls).__init__(name, bases, cdict)
+        cls._properties = {}
+        for name in set(dir(cls)):
+            prop_ = getattr(cls, name, None)
+            if (isinstance(prop_, _ndb.ModelAttribute) and not
+               isinstance(prop_, _ndb.ModelKey)):
+                prop_._fix_up(cls, name)
+                if prop_._repeated:
+                    cls._has_repeated = True
+                cls._properties[prop_._name] = prop_
+        cls._kind_map[cls.__name__] = cls
+
+
+class _Model(_ndb.Model, _ViewAndModelBase):
+
+    __metaclass__ = _MetaModel
+
+    create_on_read = False
+    update_on_create = False
 
     @classmethod
-    def create(cls, name=None, update=True, modifications=None,
-               source=None,
-               **kwargs):
+    def create(cls, name=None, update=True, parent=None, mods=None, **kwargs):
         """Create a resource.
 
         Create a resource instance of the given class with the
@@ -358,18 +680,25 @@ class StoredResource(_Resource, ndb.Model):
         """
         if not name:
             name = cls.create_name(**kwargs)
-        resource = cls(id=name)
-        if source:
-            resource._copy(source)
-        if modifications:
-            for key in modifications:
-                setattr(resource, key, modifications[key])
-        resource.create_hook(**kwargs)
-        resource.update(externally=update, **kwargs)
-        return resource
+        entity = cls(id=name, parent=parent)
+        for name, field in entity._fields.iteritems():
+            if isinstance(field, (_NestedModel, _SerialNestedModel)):
+                if not field._multivalued:
+                    setattr(entity, name, field._model.create())
+        if mods:
+            for key, value in mods.iteritems():
+                setattr(entity, key, value)
+        entity._internal_create_hook(**kwargs)
+        if update or cls.update_on_create:
+            entity.put()
+            if cls._use_instance_cache:
+                cls._instance_cache[entity.key.urlsafe()] = entity
+        else:
+            entity.put(use_memcache=False, use_datastore=False)
+        return entity
 
     @classmethod
-    def read(cls, name=None, create_name=True, create=False, **kwargs):
+    def read(cls, name, create=False, _prime=False, **kwargs):
         """Retrieve a resource
 
         Retrieve a resource of the given class with the specified name
@@ -400,31 +729,50 @@ class StoredResource(_Resource, ndb.Model):
             false.
         """
 
-        if not name and create_name:
-            name = cls.create_name(**kwargs)
         if not name:
-            return None
+            return
 
-        resource = cls._thread_cache.get((cls.__name__, name))
-        if not resource and cls._use_instance_cache:
-            resource = cls._instance_cache.get((cls.__name__, name))
+        key = _ndb.Key(cls.__name__, name)
+        key_string = key.urlsafe()
 
-        if not resource:
-            resource = ndb.Key(cls.__name__, name).get()
-            if resource:
-                resource.read_hook(**kwargs)
-                if cls._use_instance_cache:
-                    cls._instance_cache[(cls.__name__, name)] = resource
-                cls._thread_cache[(cls.__name__, name)] = resource
+        if cls._use_instance_cache:
+            resource = cls._instance_cache.get(key_string)
+            if resource is not None:
+                return resource
 
-        if not resource and create:
-            resource = cls.create(name, **kwargs)
+        if not key_string in cls._futures:
+            cls._futures[key_string] = cls._read_tasklet(key, create, **kwargs)
+
+        if _prime:
+            return
+
+        resource = cls._futures[key_string].get_result()
+
+        if cls._use_instance_cache and resource is not None:
+            cls._instance_cache[key_string] = resource
 
         return resource
 
-    def update(self, externally=True, modifications=None, 
-               source=None,
-               **kwargs):
+    @classmethod
+    @_ndb.tasklet
+    def prime(cls, *args, **kwargs):
+        cls.read(*args, _prime=True, **kwargs)
+
+    @classmethod
+    @_ndb.tasklet
+    def _read_tasklet(cls, key, create=False, use_cache=None, use_memcache=None, **kwargs):
+        resource = yield key.get_async()
+        if resource:
+            resource = resource._internal_read_hook(**kwargs)
+            for name, field in resource._fields.iteritems():
+                if isinstance(field, (_NestedModel, _SerialNestedModel)):
+                    if not field._multivalued:
+                        setattr(resource, name, field._model.create())
+        if resource is None and (create or cls.create_on_read):
+            resource = cls.create(key.string_id(), **kwargs)
+        raise _ndb.Return(resource)
+
+    def update(self, async=False, mods=None, **kwargs):
         """Save the resource.
 
         Modify the properties of the resource and save the resource to
@@ -443,20 +791,23 @@ class StoredResource(_Resource, ndb.Model):
                 hook.
 
         """
-        if modifications:
-            for key, value in modifications.iteritems():
+        if mods:
+            for key, value in mods.iteritems():
                 setattr(self, key, value)
-        if source:
-            self._copy(source)
-        self._thread_cache[
-            (self.__class__.__name__, self.key.id())
-        ] = self
-        if externally:
-            self.update_hook(**kwargs)
-            if self._use_instance_cache:
-                self._instance_cache[
-                    (self.__class__.__name__, self.key.id())] = self
-            self.put()
+        self._internal_update_hook(**kwargs)
+        if self._use_instance_cache:
+            self._instance_cache[self.key.urlsafe()] = self
+        future = self._update_tasklet(**kwargs)
+        if async:
+            return future
+        return future.get_result()
+
+    @_ndb.tasklet
+    def _update_tasklet(self, **kwargs):
+        yield self.put_async()
+        if self._use_instance_cache:
+            self._instance_cache[self.key.urlsafe()] = self
+        raise _ndb.Return()
 
     def delete(self, **kwargs):
         """Purge the resource from existence.
@@ -469,13 +820,21 @@ class StoredResource(_Resource, ndb.Model):
             **kwargs: Pass-through keyword arguments for the on_delete
                 hook.
         """
-        self.delete_hook(**kwargs)
-        self._thread_cache.pop((self.__class__.__name__,
-                                self.key.id()), None)
-        if self._use_instance_cache:
-            self._instance_cache.pop((self.__class__.__name__,
-                                      self.key.id()), None)
-        self.delete()
+        self.on_delete(**kwargs)
+        self.key.delete()
+
+    def _internal_create_hook(self, **kwargs):
+        self.on_create(**kwargs)
+
+    def _internal_read_hook(self, **kwargs):
+        self.on_read(**kwargs)
+        return self
+
+    def _internal_update_hook(self, **kwargs):
+        self.on_update(**kwargs)
+
+    def _internal_delete_hook(self, **kwargs):
+        self.on_delete(**kwargs)
 
     @classmethod
     def create_name(cls, **kwargs):
@@ -493,268 +852,298 @@ class StoredResource(_Resource, ndb.Model):
             A unique identifier for a resource (a string).
 
         """
-        return (str(uuid.uuid1()) + str(uuid.uuid4())).replace('-', '')
+        return urlsafe_b64encode(uuid.uuid4().bytes)[0:22]
 
-    def create_hook(self, **kwargs):
+    def on_create(self, **kwargs):
         """Hook called when creating a resource.
 
         This method is called just after the resource is created and
         before it is saved.
         """
 
-    def read_hook(self, **kwargs):
+    def on_read(self, **kwargs):
         """Hook called when reading a resource.
 
         This method is called just after the resource is loaded from
         the memcache or datastore.
         """
 
-    def update_hook(self, **kwargs):
+    def on_update(self, **kwargs):
         """Hook called when updating a resource.
 
         This method is called just before a resource is saved to the
         instance cache, memcache, or datastore.
         """
 
-    def delete_hook(self, **kwargs):
+    def on_delete(self, **kwargs):
         """Hook called when deleting a resource.
 
         This method is called just before a resource is deleted.
         """
 
-    @classmethod
-    def _fix_up_properties(cls):
-        cls._properties = {}
-        for name in set(dir(cls)):
-            prop_ = getattr(cls, name, None)
-            if (isinstance(prop_, ndb.ModelAttribute) and not
-               isinstance(prop_, ndb.ModelKey)):
-                prop_._fix_up(cls, name)
-                if (prop_._repeated or
-                    (isinstance(prop_, StoredStructuredProperty) and
-                     prop_._modelclass._has_repeated)):
-                    cls._has_repeated = True
-                cls._properties[prop_._name] = prop_
-        cls._kind_map[cls.__name__] = cls
 
+    @property
+    def id(self):
+        return self.key.id()
+
+    _futures = {}
+    _instance_cache = {}
+
+    _use_cache = True
     _use_instance_cache = False
     _use_memcache = True
     _use_datastore = True
-    _instance_cache = {}
-    _thread_cache = local().__dict__
-    _public_mapping = {}
+
+HTTPException = _HTTPException
 
 
-class Collection(_Resource):
-
-    _public_mapping = {}
-
-
-class _EncoderBase(StoredResource):
+class _Encoder(object):
+    @classmethod
+    def encode(cls, resource):
+        return str()
 
     @classmethod
-    def create_name(self, resource, **kwargs):
-        return resource.key.urlsafe()
+    def make_exception_response(cls, e):
+        return str()
 
-    value = StoredStringProperty()
-    _use_memcache = False
-    _use_datastore = False
+    content_type = ''
 
 
-class _HTMLEncoder(_EncoderBase):
+class _XMLEncoder(_Encoder):
 
-    def create_hook(self, resource, **kwargs):
-        template = JINJA_ENVIRONMENT.get_template('example.html')
-        self.value = template.render({
-            'resource': resource.to_dictionary(),
-            'custom_template_directory': '',
+    @classmethod
+    def encode(cls, resource):
+        root = cls.encode_dict(None, resource.as_dictionary)
+        return tostring(root)
+
+    @staticmethod
+    def remove_bad_chars(s):
+        return "".join(c for c in s if ord(c) > 31)
+
+    @classmethod
+    def encode_dict(cls, root, d):
+
+        for k, v in d['metadata'].iteritems():
+            d['metadata'][k] = cls.remove_bad_chars(unicode(v))
+
+        if root is None:
+            e = Element(d['tag'], **d['metadata'])
+        else:
+            e = SubElement(root, d['tag'], **d['metadata'])
+
+        if d.get('value') is not None:
+            e.text = cls.remove_bad_chars(unicode(d.get('value')))
+        elif d.get('contents', []):
+            pass
+        else:
+            e.text = " "
+
+        for value in d.get('contents', []):
+            cls.encode_dict(e, value)
+        return e
+
+    @classmethod
+    def make_exception_response(cls, e):
+        main = Element("error")
+        sub = SubElement(main, "message")
+        sub.text = str(e.message)
+        sub = SubElement(main, "code")
+        sub.text = str(e.code)
+        return tostring(main)
+
+    content_type = 'application/xml'
+
+
+class _HTMLEncoder(_Encoder):
+
+    @classmethod
+    def encode(cls, resource):
+        return cls._get_jinja().get_template(resource.template).render({
+            'resource': resource.as_dictionary,
         })
 
+    @classmethod
+    def make_exception_response(cls, exception):
+        return "<h1>" + str(exception.code) + ":" + exception.message + "</h1>"
 
-class _JSONEncoder(_EncoderBase):
+    @classmethod
+    def _get_jinja(cls):
+        import jinja2
+        if not cls._j2e:
+            cls._j2e = jinja2.Environment(
+                loader=jinja2.FileSystemLoader(cls._template_path),
+                extensions=['jinja2.ext.autoescape'])
+        return cls._j2e
 
-    def create_hook(self, resource, **kwargs):
-        self.value = json.dumps(resource.to_dictionary(), indent=4)
+    _j2e = None
+
+    _template_path = os.path.dirname(__file__)
+    content_type = 'text/html'
 
 
-class _Request(webapp2.Request):
+class _Handler(webapp2.RequestHandler):
+    """Base-class for request handlers."""
 
-    def get_current_user(self):
-        pass
+    def dispatch(self, **kwargs):
+        self.select_encoder()
+        self.request.response = self.response
+        try:
+            self.create_view(**self.request.route_kwargs)
+            if self.request.method == 'POST' or isinstance(self.view,
+                                                           _Collection):
+                self.view._internal_pre_modify_hook()
+                self.modify_view()
+                self.view._internal_post_modify_hook()
+                if not isinstance(self.view, _Collection):
+                    self.create_view(**self.request.route_kwargs)
+            elif self.request.method != 'GET':
+                raise _HTTPException(405)
+            self.view._internal_read_hook()
+            self.response.write(self.get_encoding())
+            self.clean_up()
+            print(self.response)
+        except _HTTPException as e:
+            self.handle_error(e)
+
+    def select_encoder(self):
+        content_type = self.request.headers.get('Accept')
+        for encoder in reversed(self.encoders):
+            self.encoder = encoder
+            if self.request.get('format'):
+                if encoder.content_type in self.request.get('format'):
+                    break
+            elif content_type is None or encoder.content_type in content_type:
+                break
+
+        if not self.encoder:
+            self.encoder = self.encoders[0]
+        self.response.headers['Content-Type'] = encoder.content_type
+
+    def create_view(self, view_name=None, resource_id=None):
+        if not view_name:
+            if self.request.path == '/':
+                view_name = "/"
+            else:
+                raise _HTTPException(404)
+        view_class = _View._mapping.get(view_name)
+        if not view_class:
+            raise _HTTPException(404)
+        if issubclass(view_class, _View):
+            self.view = view_class(resource_id=resource_id)
+        else:
+            if resource_id:
+                raise _HTTPException(404)
+            self.view = view_class()
+
+    def modify_view(self):
+        modifications = {}
+        for key, value in self.request.params.iteritems():
+            if key not in modifications:
+                modifications[key] = []
+            modifications[key].append(value)
+        for name, field in self.view._fields.iteritems():
+            if not field._modifiable or not name in modifications:
+                continue
+            try:
+                value = [field._coerce(v) for v in modifications[name]]
+            except (TypeError, ValueError):
+                continue
+            if not field._multivalued:
+                value = value[-1]
+            setattr(self.view, name, value)
+
+    def get_encoding(self):
+        return self.encoder.encode(self.view)
+
+    def clean_up(self):
+        if _DEVELOPMENT:
+            _ndb.get_context().clear_cache()
+        _Model._futures = {}
+
+    def handle_error(self, exception):
+        if _DEVELOPMENT:
+            traceback.print_exc()
+        if isinstance(exception, _HTTPException):
+            self.response.set_status(exception.code, exception.message)
+            self.response.write(
+                self.encoder.make_exception_response(exception))
+        else:
+            raise exception
+
+    encoder = None
+    encoders = [_XMLEncoder, _HTMLEncoder]
 
 
 class Hydro(webapp2.WSGIApplication):
     """The application."""
 
-    def __init__(self, current_user_getter=None, **kwargs):
+    def __init__(self, template_path=None, default_template=None, **kwargs):
 
-        if current_user_getter:
-            self.request_class.get_current_user = current_user_getter
+        if template_path is not None:
+            _HTMLEncoder._template_path = template_path
+
+        if default_template is not None:
+            _ViewBase.template = default_template
 
         super(Hydro, self).__init__(
             [
-                webapp2.Route('/', _RootHandler),
-                webapp2.Route('/<class_name>', _TransientHandler),
-                webapp2.Route('/<class_name>/<name>', _StoredHandler),
-                webapp2.Route('/<class_name>/', _CollectionHandler),
-                webapp2.Route('<:.*>', _GarbageHandler),
+                webapp2.Route('/', Handler),
+                webapp2.Route('/<view_name>', Handler),
+                webapp2.Route('/<view_name>/', Handler),
+                webapp2.Route('/<view_name>/<resource_id>', Handler),
+                webapp2.Route('<:.*>', Handler),
             ],
-            config=dict({
-                'front_page': None,
-                'template_path': 'static/private/templates',
-            }.items() + kwargs.pop('config', {}).items()),
-            **kwargs)
-
-    request_class = _Request
-
-
-class _RequestHandler(webapp2.RequestHandler):
-    """Base-class for request handlers.
-
-    The dispatch method of this handler serves every well formed
-    request.
-
-    Class Attributes:
-
-        _resource_class: The base-class of resources this request
-            handler serves.  One of the three resource types.
-        _allowed_methods: A list of strings indicating the allowed
-            HTTP methods for this request handler (i.e. ['GET']).
-        _modification_methods: A list of strings indiciating the HTTP
-            methods that when used, cause the request handler to
-            modify the resource.
-    """
-
-    def dispatch(self):
-
-        try:
-
-            if self.request.method not in self._allowed_methods:
-                raise HTTPException(405, "Method not allowed.")
-
-            # Obtain the class of the requested resource.
-            Resource = self._resource_class._public_mapping.get(
-                self.request.route_kwargs.get('class_name'))
-            if not Resource:
-                raise HTTPException(400, "The requested resource could\
-                not be found.")
-
-            user = self.request.get_current_user()
-            resource = Resource.read(
-                name=self.request.route_kwargs.get('name'),
-                user=user,
-            )
-            resource.client_read_hook(user)
-
-            resource.client_authorize_hook(user)
-            resource.authorize(user)
-
-            if self.request.method in self._modification_methods:
-
-                modifications = {}
-                for key, value in self.request.params.iteritems():
-                    if key not in modifications:
-                        modifications[key] = []
-                    modifications[key].append(value)
-
-                if 'application/json' in self.request.headers['Content-Type']:
-                    try:
-                        json_modifications = json.loads(self.request.body)
-                        if not isinstance(json_modifications, dict):
-                            raise TypeError
-                    except:
-                        pass
-                    else:
-                        for key, value in json_modifications.iteritems():
-                            if not isinstance(value, list):
-                                json_modifications[key] = [value]
-                    modifications.update(json_modifications)
-
-                for property_ in resource._properties_:
-                    if property_._verbose_name:
-                        name = property_._verbose_name
-                    else:
-                        name = property_._name
-                    if (property_._modifiable and name in modifications):
-                        value = modifications[name]
-                        if not isinstance(value, list):
-                            value = [value]
-                        value = [property_._validate(v) for v in value]
-                        if not property_._repeated:
-                            value = value[0]
-                        setattr(resource, name, value)
-
-                resource.client_update_hook(user)
-
-            content_type = self.request.headers.get('Accept')
-            if 'text/html' in content_type:
-                Encoder = _HTMLEncoder
-                self.response.headers['Content-Type'] = 'text/html'
-            elif 'application/json' in content_type:
-                self.response.headers['Content-Type'] = 'application/json'
-                Encoder = _JSONEncoder
-            else:
-                raise HTTPException(406, "Unsupported content type.")
-
-            self.response.write(
-                Encoder.read(
-                    create=True,
-                    update=True,
-                    resource=resource,
-                ).value
-            )
-
-        except Exception as exception:
-            self.handle_exception(exception)
-
-    def handle_exception(self, exception):
-
-        traceback.print_exc()
-        if isinstance(exception, HTTPException):
-            self.response.write(('<h2>' + str(exception.code) + ': '
-                                 + exception.message + '</h2>'))
-        else:
-            raise exception
-
-    _allowed_methods = ['GET']
-    _modification_methods = []
-
-
-class _TransientHandler(_RequestHandler):
-    """Handler for requests for transient resources."""
-    _resource_class = TransientResource
-    _allowed_methods = ['GET', 'POST']
-    _modification_methods = ['POST']
-
-
-class _StoredHandler(_RequestHandler):
-    """Handler for requests for persistent resources."""
-    _resource_class = StoredResource
-
-
-class _CollectionHandler(_RequestHandler):
-    """Handler for requests for collections of resources."""
-    _resource_class = Collection
-    _modification_methods = ['GET']
-
-
-class _RootHandler(_RequestHandler):
-    """Handler for requests for the root resource."""
-    def dispatch(self):
-        if '/' in TransientResource._public_mapping:
-            self.__class__ = _TransientHandler
-        elif '/' in Collection._public_mapping:
-            self.__class__ = _CollectionHandler
-        else:
-            self.__class__ = _GarbageHandler
-        self.request.route_kwargs['class_name'] = '/'
-        self.dispatch()
-
-
-class _GarbageHandler(_RequestHandler):
-    """Handler for requests at an unrecognized URN."""
-    def dispatch(self):
-        super(_GarbageHandler, self).handle_exception(
-            HTTPException(404, "The requested resource could not be\
-            found.")
+            config=kwargs,
         )
+
+    def enable_appstats(self):
+        return recording.appstats_wsgi_middleware(self)
+
+
+Encoder = _Encoder
+Handler = _Handler
+
+Model = _Model
+
+View = _View
+Collection = _Collection
+
+
+Inherited = _Inherited
+
+""" Properties """
+String = _String
+Integer = _Integer
+Float = _Float
+Boolean = _Boolean
+
+Input = _Input
+StringInput = _StringInput
+IntegerInput = _IntegerInput
+FloatInput = _FloatInput
+BooleanInput = _BooleanInput
+BlobInput = _BlobInput
+
+
+Meta = _Meta
+
+Serial = _Serial
+
+Static = _Static
+Computed = _Computed
+
+Filter = _Filter
+NestedModel = _NestedModel
+SerialNestedModel = _SerialNestedModel
+
+NestedView = _NestedView
+
+""" Exceptions """
+HTTPException = _HTTPException
+
+
+transaction = _ndb.transactional
+mail = _mail
+DEVELOPMENT = _DEVELOPMENT
+
+
