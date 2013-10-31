@@ -33,8 +33,10 @@ from google.appengine.api import mail as _mail
 
 _DEVELOPMENT = os.environ.get('SERVER_SOFTWARE', 'Dev').startswith('Dev')
 _BOOLEAN_FALSES = [False, 0, 'False', 'false', 'No', 'no', 'NO' ]
+_SERVER_DOWN = False
 
 get_request = webapp2.get_request
+
 
 class _HTTPException(Exception):
     """Exception with a message and HTTP status code.
@@ -984,10 +986,12 @@ class _HTMLEncoder(_Encoder):
 class _Handler(webapp2.RequestHandler):
     """Base-class for request handlers."""
 
-    def dispatch(self, **kwargs):
+    def dispatch(self, **kwargs):        
         self.select_encoder()
         self.request.response = self.response
         try:
+            if _SERVER_DOWN:
+                raise HTTPException(503, "The server is currently down.")
             self.create_view(**self.request.route_kwargs)
             if self.request.method == 'POST' or isinstance(self.view,
                                                            _Collection):
