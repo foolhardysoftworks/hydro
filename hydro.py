@@ -36,6 +36,11 @@ _BOOLEAN_FALSES = [False, 0, 'False', 'false', 'No', 'no', 'NO' ]
 
 get_request = webapp2.get_request
 
+
+def generate_opaque_id():
+    return urlsafe_b64encode(uuid.uuid4().bytes)[0:22]
+
+
 class _HTTPException(Exception):
     """Exception with a message and HTTP status code.
 
@@ -197,7 +202,7 @@ class _StandardField(_Field):
         return self._coerce(value)
 
     def __set__(self, parent, value):
-        if isinstance(parent, _Model):
+        if isinstance(parent, _ndb.Model):
             self._ndb_class.__set__(self, parent, value)
         else:
             parent.__dict__[self._name] = value
@@ -205,7 +210,7 @@ class _StandardField(_Field):
     def __get__(self, parent, _=None):
         if parent is None:
             return self
-        elif isinstance(self, _ndb.Property) and isinstance(parent, _Model):
+        elif isinstance(self, _ndb.Property) and isinstance(parent, _ndb.Model):
             value = self._get_value(parent)
             if value is None:
                 return super(_StandardField, self).__get__(parent, _)
@@ -416,7 +421,7 @@ class _ViewAndModelBase(object):
                     pass
             if field._pass_name:
                 d['metadata']['name'] = field._name
-            if isinstance(d['value'], (_View, _Model)):
+            if isinstance(d['value'], (_View, _ndb.Model)):
                 r = d['value'].as_dictionary
                 d['value'] = str()
                 d['contents'] = r['contents']
@@ -449,23 +454,10 @@ class _ViewBase(_ViewAndModelBase):
     path = None
     template = "index.html"
 
-    @classmethod
-    def create(cls, *args, **kwargs):
-        return cls(*args, **kwargs)
-
-    def _internal_read_hook(self):
-        self.on_read()
-
-    def _internal_pre_modify_hook(self):
+    def get(self):
         pass
 
-    def _internal_post_modify_hook(self):
-        self.on_submit()
-
-    def on_submit(self):
-        pass
-
-    def on_read(self):
+    def post(self):
         pass
 
     def redirect(self, view_or_string, resource=None):
@@ -483,53 +475,26 @@ class _View(_ViewBase):
 
     path = None
     model = None
-    _resource_id = None
-    _resource = None
-
-    def __init__(self, resource=None, resource_id=None):
-        if isinstance(resource, basestring):
-            resource_id = resource
-            resource = None
-        if resource_id is not None:
-            self._resource_id = resource_id
-        if resource is not None:
-            self._resource_id = resource.key.urlsafe()
-            self._resource = resource
-        for name, field in self._fields.iteritems():
-            if isinstance(field, _NestedView):
-                if field._multivalued:
-                    setattr(self, name, [])
-                else:
-                    subview = field._view(
-                        resource_id=self._resource_id)
-                    subview.model = self.model
-                    setattr(self, name, subview)
-
-    def prime(self):
-        if self.model and self._resource_id and not self._resource:
-            self.model.prime(self._resource_id)
+    key = None
+    _entity = None
 
     @property
     def entity(self):
-        return self.resource
-
-    @property
-    def resource(self):
-        if not self._resource:
-            if not self.model or not self._resource_id:
+        if self._entity is None:
+            if self.key is None:
                 raise HTTPException(404)
-            self._resource = self.model.read(self._resource_id)
-        if not self._resource:
-            raise HTTPException(404)
-        return self._resource
+            self._entity = self.key.get()
+            if self._entity is None:
+                raise HTTPException(404)
+        return self._entity
 
     @property
     def as_dictionary(self):
         if self._as_dictionary is not None:
             return self._as_dictionary
         d = super(_View, self).as_dictionary
-        if self._resource_id:
-            d['metadata']['id'] = self.resource.id
+        if self.key:
+            d['metadata']['id'] = self.key.id()
         return d
 
 
@@ -626,273 +591,8 @@ class _Collection(_ViewBase):
             self._next_page = next_cursor.urlsafe()
 
 
-class _MetaModel(_ndb.MetaModel, _MetaBase):
-    def __init__(cls, name, bases, cdict):
-        super(_ndb.MetaModel, cls).__init__(name, bases, cdict)
-        super(_MetaBase, cls).__init__(name, bases, cdict)
-        cls._properties = {}
-        for name in set(dir(cls)):
-            prop_ = getattr(cls, name, None)
-            if (isinstance(prop_, _ndb.ModelAttribute) and not
-               isinstance(prop_, _ndb.ModelKey)):
-                prop_._fix_up(cls, name)
-                if prop_._repeated:
-                    cls._has_repeated = True
-                cls._properties[prop_._name] = prop_
-        cls._kind_map[cls.__name__] = cls
 
 
-class _Model(_ndb.Model, _ViewAndModelBase):
-
-    __metaclass__ = _MetaModel
-
-    create_on_read = False
-    update_on_create = False
-
-    @classmethod
-    def create(cls, name=None, update=True, parent=None, mods=None, **kwargs):
-        """Create a resource.
-
-        Create a resource instance of the given class with the
-        specified name.  If the name is not specified, it is generated
-        with the create_name class-method.  The resource is placed
-        immediately in the thread cache, and optionally into the
-        instance cache, memcache, and datastore.  Additional
-        functionality can be added with the on_create hook.
-
-        Args:
-            name: A string identifying the created resource. A name
-                will be generated if not specified.
-            update: A boolean indicating whether or not to save the
-                resource to the memcache and datastore *after* calling
-                the on_create hook.
-            **kwargs: Pass through keyword arguments for the
-                create_name, on_create, and update methods (when
-                applicable).
-
-        Returns:
-            A shiny new resource.
-
-        Note:
-           This effectively replaces the class constructor. All
-           resources should be created with this method.
-
-        """
-        if not name:
-            name = cls.create_name(**kwargs)
-        entity = cls(id=name, parent=parent)
-        for name, field in entity._fields.iteritems():
-            if isinstance(field, (_NestedModel, _SerialNestedModel)):
-                if not field._multivalued:
-                    setattr(entity, name, field._model.create())
-        if mods:
-            for key, value in mods.iteritems():
-                setattr(entity, key, value)
-        entity._internal_create_hook(**kwargs)
-        if update or cls.update_on_create:
-            entity.put()
-            if cls._use_instance_cache:
-                cls._instance_cache[entity.key.urlsafe()] = entity
-        else:
-            entity.put(use_memcache=False, use_datastore=False)
-        return entity
-
-    @classmethod
-    def read(cls, name, create=False, _prime=False, **kwargs):
-        """Retrieve a resource
-
-        Retrieve a resource of the given class with the specified name
-        from the thread cache, instance cache, memcache, or datastore.
-        If the name is not specified, it is generated with the
-        create_name method.  If the resource is not found in any of
-        those locations and create is true, a new resource will be
-        created.  Additional functionality can be added with the
-        on_read hook.  When a resource is retrieved it is
-        automatically saved to the caches, i.e. if its found in the
-        datastore it will be saved to the memcache, instance cache,
-        and thread cache (when applicable).
-
-        Args:
-            name: A string identifying the resource to retrieve.
-            create_name: A boolean indicating whether or not to create
-                a name if the specified name is false.
-            create: A boolean indicating whether or not to create a
-                resource with the create method if the resource cannot
-                be found.
-            **kwargs : Pass through keyword arguments for the
-                create_name, create, and on_read methods (when
-                applicable).
-
-        Returns:
-            A resource, if the resource was found or create was
-            true. None if the resource was not found and create was
-            false.
-        """
-
-        if not name:
-            return
-
-        key = _ndb.Key(cls.__name__, name)
-        key_string = key.urlsafe()
-
-        if cls._use_instance_cache:
-            resource = cls._instance_cache.get(key_string)
-            if resource is not None:
-                return resource
-
-        if not key_string in cls._futures:
-            cls._futures[key_string] = cls._read_tasklet(key, create, **kwargs)
-
-        if _prime:
-            return
-
-        resource = cls._futures[key_string].get_result()
-
-        if cls._use_instance_cache and resource is not None:
-            cls._instance_cache[key_string] = resource
-
-        return resource
-
-    @classmethod
-    @_ndb.tasklet
-    def prime(cls, *args, **kwargs):
-        cls.read(*args, _prime=True, **kwargs)
-
-    @classmethod
-    @_ndb.tasklet
-    def _read_tasklet(cls, key, create=False, use_cache=None, use_memcache=None, **kwargs):
-        resource = yield key.get_async()
-        if resource:
-            resource = resource._internal_read_hook(**kwargs)
-            for name, field in resource._fields.iteritems():
-                if isinstance(field, (_NestedModel, _SerialNestedModel)):
-                    if not field._multivalued:
-                        setattr(resource, name, field._model.create())
-        if resource is None and (create or cls.create_on_read):
-            resource = cls.create(key.string_id(), **kwargs)
-        raise _ndb.Return(resource)
-
-    def update(self, async=False, mods=None, **kwargs):
-        """Save the resource.
-
-        Modify the properties of the resource and save the resource to
-        the thread cache.  If externally is true, also save the
-        resource to the instance cache, memcache, and datastore (when
-        applicable). Additional functionality can be added with the
-        on_update hook.
-
-        Args:
-            externally: A boolean indicating whether or not to save
-                the resource to the instance cache, memcache, and
-                datastore (when applicable).
-            modifications: A dictionary of property name/property
-                values to set before updating.
-            **kwargs: Pass-through keyword arguments for the on_update
-                hook.
-
-        """
-        if mods:
-            for key, value in mods.iteritems():
-                setattr(self, key, value)
-        self._internal_update_hook(**kwargs)
-        if self._use_instance_cache:
-            self._instance_cache[self.key.urlsafe()] = self
-        future = self._update_tasklet(**kwargs)
-        if async:
-            return future
-        return future.get_result()
-
-    @_ndb.tasklet
-    def _update_tasklet(self, **kwargs):
-        yield self.put_async()
-        if self._use_instance_cache:
-            self._instance_cache[self.key.urlsafe()] = self
-        raise _ndb.Return()
-
-    def delete(self, **kwargs):
-        """Purge the resource from existence.
-
-        Remove the resource from the thread cache, instance cache,
-        memcache, and datastore. Additional functionality can be added
-        with the on_delete hook.
-
-        Args:
-            **kwargs: Pass-through keyword arguments for the on_delete
-                hook.
-        """
-        self.on_delete(**kwargs)
-        self.key.delete()
-
-    def _internal_create_hook(self, **kwargs):
-        self.on_create(**kwargs)
-
-    def _internal_read_hook(self, **kwargs):
-        self.on_read(**kwargs)
-        return self
-
-    def _internal_update_hook(self, **kwargs):
-        self.on_update(**kwargs)
-
-    def _internal_delete_hook(self, **kwargs):
-        self.on_delete(**kwargs)
-
-    @classmethod
-    def create_name(cls, **kwargs):
-        """Create a name for a resource.
-
-        Generate a unique identifier using a combination of uuid1 and
-        uuid4.  There is virtually no chance of collision and the
-        identifier should be securely random.  This method can be
-        overriden to add context to the identifier.
-
-        Args:
-            **kwargs: Not used, but here for compatibility.
-
-        Returns:
-            A unique identifier for a resource (a string).
-
-        """
-        return urlsafe_b64encode(uuid.uuid4().bytes)[0:22]
-
-    def on_create(self, **kwargs):
-        """Hook called when creating a resource.
-
-        This method is called just after the resource is created and
-        before it is saved.
-        """
-
-    def on_read(self, **kwargs):
-        """Hook called when reading a resource.
-
-        This method is called just after the resource is loaded from
-        the memcache or datastore.
-        """
-
-    def on_update(self, **kwargs):
-        """Hook called when updating a resource.
-
-        This method is called just before a resource is saved to the
-        instance cache, memcache, or datastore.
-        """
-
-    def on_delete(self, **kwargs):
-        """Hook called when deleting a resource.
-
-        This method is called just before a resource is deleted.
-        """
-
-
-    @property
-    def id(self):
-        return self.key.id()
-
-    _futures = {}
-    _instance_cache = {}
-
-    _use_cache = True
-    _use_instance_cache = False
-    _use_memcache = True
-    _use_datastore = True
 
 HTTPException = _HTTPException
 
@@ -989,19 +689,18 @@ class _Handler(webapp2.RequestHandler):
         self.request.response = self.response
         try:
             self.create_view(**self.request.route_kwargs)
-            if self.request.method == 'POST' or isinstance(self.view,
-                                                           _Collection):
-                self.view._internal_pre_modify_hook()
+            if self.request.method == 'POST':
                 self.modify_view()
-                self.view._internal_post_modify_hook()
-                if not isinstance(self.view, _Collection):
-                    self.create_view(**self.request.route_kwargs)
-            elif self.request.method != 'GET':
+                self.view.post()
+                self.create_view(**self.request.route_kwargs)
+            elif self.request.method == 'GET':
+                if isinstance(self.view, _Collection):
+                    self.modify_view()
+                self.view.get()
+            else:
                 raise _HTTPException(405)
-            self.view._internal_read_hook()
             self.response.write(self.get_encoding())
             self.clean_up()
-            print(self.response)
         except _HTTPException as e:
             self.handle_error(e)
 
@@ -1028,12 +727,10 @@ class _Handler(webapp2.RequestHandler):
         view_class = _View._mapping.get(view_name)
         if not view_class:
             raise _HTTPException(404)
-        if issubclass(view_class, _View):
-            self.view = view_class(resource_id=resource_id)
-        else:
-            if resource_id:
-                raise _HTTPException(404)
-            self.view = view_class()
+        self.view = view_class()
+        self.view.top_path = resource_id
+        if self.view.model is not None and resource_id is not None:
+            self.view.key = _ndb.Key(self.view.model, resource_id)
 
     def modify_view(self):
         modifications = {}
@@ -1058,7 +755,6 @@ class _Handler(webapp2.RequestHandler):
     def clean_up(self):
         if _DEVELOPMENT:
             _ndb.get_context().clear_cache()
-        _Model._futures = {}
 
     def handle_error(self, exception):
         if _DEVELOPMENT:
@@ -1103,8 +799,6 @@ class Hydro(webapp2.WSGIApplication):
 Encoder = _Encoder
 Handler = _Handler
 
-Model = _Model
-
 View = _View
 Collection = _Collection
 
@@ -1124,6 +818,7 @@ FloatInput = _FloatInput
 BooleanInput = _BooleanInput
 BlobInput = _BlobInput
 
+Field = _String
 
 Meta = _Meta
 
