@@ -14,11 +14,13 @@ import copy
 import uuid
 import collections
 import inspect
+import datetime
 
 import webapp2
 import bleach  # Not included in GAE
 
-from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.etree.ElementTree import SubElement, tostring
+from xml.etree.ElementTree import Element as Element_
 from base64 import urlsafe_b64encode
 
 from google.appengine.ext import ndb as _ndb
@@ -40,6 +42,16 @@ get_request = webapp2.get_request
 def generate_opaque_id():
     return urlsafe_b64encode(uuid.uuid4().bytes)[0:22]
 
+
+
+
+
+def abort(*args, **kwargs):
+    raise _HTTPException(*args, **kwargs)
+
+
+def get_current_address():
+    return webapp2.get_request().remote_addr
 
 class _HTTPException(Exception):
     """Exception with a message and HTTP status code.
@@ -70,26 +82,18 @@ class _HTTPException(Exception):
         499: "Unknown client error."
     }
 
-    def __init__(self, code=None, message=None):
+    def __init__(self, code=None, message=None, **kwargs):
         if code is not None:
             self.code = code
         if message is not None:
             self.message = message
         elif self.code in self.message_map:
             self.message = self.message_map[self.code]
+        for key, val in kwargs.iteritems():
+            setattr(self, key, val)
+            
 
 
-class _Inherited(object):
-    def __init__(self, *args):
-        self.names = args
-
-    def get_value(self, entity):
-        for name in self.names:
-            if isinstance(entity, dict):
-                entity = entity[name]
-            else:
-                entity = getattr(entity, name)
-        return entity
 
 
 class _Localized(object):
@@ -113,6 +117,7 @@ class _Field(object):
     _modifiable = False
     _pass_name = False
     _fixed_metadata = None
+    _required = True
 
     _name = None
     _parent_class = None
@@ -125,6 +130,7 @@ class _Field(object):
                  multivalued=None,
                  indexed=None,
                  metadata=None,
+                 required=None,
                  **kwargs):
         self._default_ = default
         if tag is not None:
@@ -141,6 +147,8 @@ class _Field(object):
         self._metadata.update(kwargs)
         if self._fixed_metadata is not None:
             self._metadata.update(self._fixed_metadata)
+        if required is not None:
+            self._required = required
         self._index = self._counter
         _Field._counter += 1
 
@@ -151,12 +159,36 @@ class _Field(object):
             value = parent.__dict__[self._name]
         else:
             value = copy.deepcopy(self._default_)
+            setattr(parent, self._name, value)
         if self._multivalued:
             if value is None:
                 return []
             if not isinstance(value, (list, tuple)):
                 return [value]
         return value
+
+class _Output(_Field):
+    pass
+
+class _Inherited(_Field):
+    def __init__(self, *args):
+        self.names = args
+        super(_Inherited, self).__init__()
+
+    def get_value(self, entity):
+        if not self.names:
+            return getattr(entity, self._name)
+
+        for name in self.names:
+                
+            if isinstance(entity, dict):
+                entity = entity[name]
+            else:
+                if name == '__id__':
+                    entity = entity.key.id()
+                else:
+                    entity = getattr(entity, name)
+        return entity
 
 
 class _Static(_Field):
@@ -407,6 +439,8 @@ class _ViewAndModelBase(object):
             if isinstance(field, _Meta):
                 self._as_dictionary['metadata'][name] = getattr(self, name)
                 continue
+            if not isinstance(field, _Output):
+                continue
             d = dict()
             d['tag'] = field._tag if field._tag else field._name
             d['value'] = getattr(self, name)
@@ -426,8 +460,9 @@ class _ViewAndModelBase(object):
                 d['value'] = str()
                 d['contents'] = r['contents']
                 d['metadata'].update(r['metadata'])
-            if isinstance(d['value'], _Inherited):
-                d['value'] = d['value'].get_value(self.entity)
+            if isinstance(field, _Inherited):
+                print 'INHERITED'
+                d['value'] = field.get_value(self.entity)
             self._as_dictionary['contents'].append(d)
         for key in self._as_dictionary['metadata']:
             if isinstance(self._as_dictionary['metadata'][key], _Inherited):
@@ -447,6 +482,10 @@ class _ViewAndModelBase(object):
     def remote_address(self):
         return webapp2.get_request().remote_addr
 
+    @property
+    def address(self):
+        return webapp2.get_request().remote_addr
+
 
 class _ViewBase(_ViewAndModelBase):
 
@@ -454,10 +493,14 @@ class _ViewBase(_ViewAndModelBase):
     path = None
     template = "index.html"
 
-    def get(self):
+    def dispatch(self):
+        self.handler()
+        self.respond()
+
+    def handler(self):
         pass
 
-    def post(self):
+    def respond(self):
         pass
 
     def redirect(self, view_or_string, resource=None):
@@ -477,6 +520,29 @@ class _View(_ViewBase):
     model = None
     key = None
     _entity = None
+    id = None
+
+    def __init__(self, entity=None):
+        self._entity = entity
+
+    def abort(self, *args, **kwargs):
+        abort(*args, **kwargs)
+
+    @property
+    def address(self):
+        return webapp2.get_request().remote_addr
+
+    @property
+    def now(self):
+        return datetime.datetime.utcnow()
+
+    @property
+    def resource(self):
+        return self.entity
+
+    @resource.setter
+    def resource(self, value):
+        self.entity = value
 
     @property
     def entity(self):
@@ -488,6 +554,10 @@ class _View(_ViewBase):
                 raise HTTPException(404)
         return self._entity
 
+    @entity.setter
+    def entity(self, value):
+        self._entity = value
+
     @property
     def as_dictionary(self):
         if self._as_dictionary is not None:
@@ -498,11 +568,20 @@ class _View(_ViewBase):
         return d
 
 
+class _GET(_View):
+    _mapping = dict()
+
+
+class _POST(_View):
+    _mapping = dict()
+
+
 class _Collection(_ViewBase):
 
     __metaclass__ = _MetaView
 
     view = None
+    model = None
 
     def _internal_read_hook(self):
         pass
@@ -623,20 +702,32 @@ class _XMLEncoder(_Encoder):
     @classmethod
     def encode_dict(cls, root, d):
 
+        if isinstance(d.get('value'), list):            
+            for x in d.get('value'):
+                newd = {
+                    'tag': d['tag'],
+                    'contents': d['contents'],
+                    'value': x,
+                    'metadata': d['metadata']
+                }
+                cls.encode_dict(root, newd)
+            return
+
+
         for k, v in d['metadata'].iteritems():
             d['metadata'][k] = cls.remove_bad_chars(unicode(v))
 
         if root is None:
-            e = Element(d['tag'], **d['metadata'])
+            e = Element_(d['tag'], **d['metadata'])
         else:
             e = SubElement(root, d['tag'], **d['metadata'])
 
         if d.get('value') is not None:
             e.text = cls.remove_bad_chars(unicode(d.get('value')))
-        elif d.get('contents', []):
-            pass
-        else:
+        if d.get('value') == "":
             e.text = " "
+
+        
 
         for value in d.get('contents', []):
             cls.encode_dict(e, value)
@@ -644,7 +735,7 @@ class _XMLEncoder(_Encoder):
 
     @classmethod
     def make_exception_response(cls, e):
-        main = Element("error")
+        main = Element_("error")
         sub = SubElement(main, "message")
         sub.text = str(e.message)
         sub = SubElement(main, "code")
@@ -689,16 +780,10 @@ class _Handler(webapp2.RequestHandler):
         self.request.response = self.response
         try:
             self.create_view(**self.request.route_kwargs)
-            if self.request.method == 'POST':
-                self.modify_view()
-                self.view.post()
-                self.create_view(**self.request.route_kwargs)
-            elif self.request.method == 'GET':
-                if isinstance(self.view, _Collection):
-                    self.modify_view()
-                self.view.get()
-            else:
-                raise _HTTPException(405)
+            self.view.request = self.request
+            self.view.response = self.response
+            self.modify_view()
+            self.view.dispatch()
             self.response.write(self.get_encoding())
             self.clean_up()
         except _HTTPException as e:
@@ -724,11 +809,17 @@ class _Handler(webapp2.RequestHandler):
                 view_name = "/"
             else:
                 raise _HTTPException(404)
-        view_class = _View._mapping.get(view_name)
+        if self.request.method == 'GET':
+            view_class = _GET._mapping.get(view_name)
+        elif self.request.method == 'POST':
+            view_class = _POST._mapping.get(view_name)
+        else:
+            raise HTTPException()
         if not view_class:
             raise _HTTPException(404)
         self.view = view_class()
         self.view.top_path = resource_id
+        self.view.id = resource_id
         if self.view.model is not None and resource_id is not None:
             self.view.key = _ndb.Key(self.view.model, resource_id)
 
@@ -739,7 +830,9 @@ class _Handler(webapp2.RequestHandler):
                 modifications[key] = []
             modifications[key].append(value)
         for name, field in self.view._fields.iteritems():
-            if not field._modifiable or not name in modifications:
+            if not isinstance(field, _Input):
+                continue
+            if not name in modifications:
                 continue
             try:
                 value = [field._coerce(v) for v in modifications[name]]
@@ -748,6 +841,14 @@ class _Handler(webapp2.RequestHandler):
             if not field._multivalued:
                 value = value[-1]
             setattr(self.view, name, value)
+        for name, field in self.view._fields.iteritems():
+            if not field._required:
+                continue
+            if not isinstance(field, _Input):
+                continue
+            if getattr(self.view, name) is None:
+                self.view.abort(400, "No %s Specified" % name)
+                    
 
     def get_encoding(self):
         return self.encoder.encode(self.view)
@@ -800,16 +901,23 @@ Encoder = _Encoder
 Handler = _Handler
 
 View = _View
+GET = _GET
+POST = _POST
 Collection = _Collection
+
+Get = _GET
+Post = _POST
+
+
 
 
 Inherited = _Inherited
 
 """ Properties """
-String = _String
-Integer = _Integer
-Float = _Float
-Boolean = _Boolean
+String = _StringInput
+Integer = _IntegerInput
+Float = _FloatInput
+Boolean = _BooleanInput
 
 Input = _Input
 StringInput = _StringInput
@@ -837,8 +945,36 @@ NestedView = _NestedView
 HTTPException = _HTTPException
 
 
+Generic = Field
+Output = _Output
+Element = Field
+
 transaction = _ndb.transactional
 mail = _mail
 DEVELOPMENT = _DEVELOPMENT
+
+Error = HTTPException
+
+"""
+
+EXCEPTIONS
+HTTPException
+
+VIEWS
+Get
+Post
+
+FIELDS
+Generic
+Inherited
+Localized
+StringInput
+FloatInput
+BooleanInput
+IntegerInput
+
+
+
+"""
 
 
