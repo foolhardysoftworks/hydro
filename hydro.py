@@ -7,6 +7,7 @@ import traceback
 import copy
 import collections
 import webapp2
+import json
 import xml.etree.ElementTree
 
 
@@ -90,8 +91,9 @@ class _Input(_Field):
                  
 class _Output(_Field):
     
-    def __init__(self, default=None, alias=None, **kwargs):
+    def __init__(self, default=None, alias=None, multivalued=False, **kwargs):
         super(_Output, self).__init__(default=default, alias=alias)
+        self._multivalued = multivalued
         self._meta = {}
         self._meta.update(kwargs)
 
@@ -107,7 +109,7 @@ class _Inherited(object):
         self._names = names
 
     def _resolve(self, field, entity):
-        if not self.names:
+        if not self._names:
             return getattr(entity, field._name)
         for name in self.names:
             entity = getattr(entity, name)
@@ -209,35 +211,49 @@ class _View(object):
     def __init__(self, entity=None):
         self._entity = entity
 
-    def _interpret_value(self, value):
-        pass
-
-    @property
-    def as_dictionary(self):
-        if hasattr(self, '_as_dictionary'):
-            return self._as_dictionary
-        d = {'name': 'resource', 'meta': {}, 'value': []}
-        if getattr(self, 'name', None):
-            d['name'] = self.name
-        elif self.path and self.path != '/':
-            d['name'] = self.path
+    def to_dict(self):
+        d = {'name': 'resource', 'meta': {}, 'value': None, 'contents': []}
+        if hasattr(self, 'name'):
+            d['name'] = str(self.name)
+        elif hasattr(self, 'path'):
+            d['name'] = str(self.path)
 
         for name, meta in self._metas.iteritems():
-            value = getattr(self, name)
-            if isinstance(value, _Inherited):
-                value = value._resolve(meta, self)
-            d['meta'][meta._alias or meta._name] = value
+            meta_value = getattr(self, name)
+            if isinstance(meta_value, _Inherited):
+                meta_value = meta_value._resolve(meta, self.entity)
+            d['meta'][meta._alias or meta._name] = meta_value
         
         for name, output in self._outputs.iteritems():
             value = getattr(self, name)
             if isinstance(value, _Inherited):
-                value = value._resolve(output, self)
+                value = value._resolve(output, self.entity)
+            if output._multivalued and value is not None:
+                for value_ in value:
+                    if isinstance(value_, _View):
+                        f = value_.to_dict()
+                    else:
+                        f = {'name': output._alias or name, 'meta': {},
+                             'value': value_, 'contents': []}
+                    f['meta'].update(output._meta)
+                    d['contents'].append(f)
+                continue
             if isinstance(value, _View):
-                value = [value.to_dictionary()]
-            f = {'name': output._alias or name, 'meta': {}, 'value': value}
+                f = value.to_dict()
+                f['name'] = output._alias or name
+                f['meta'].update(output._meta)
+                d['contents'].append(f)
+                continue
+
+            f = {'name': output._alias or name, 'meta': {},
+                 'value': value, 'contents': []}
             f['meta'].update(output._meta)
-            d['value'].append(f)
+            d['contents'].append(f)
+            self.to_dict_hook(d)
         return d
+
+    def to_dict_hook(self, d):
+        pass
             
     def respond(self):
         pass
@@ -275,7 +291,7 @@ class _Encoder(object):
 class _XMLEncoder(_Encoder):
 
     def encode(self, view):
-        root = self.encode_helper(None, view.as_dictionary)
+        root = self.encode_helper(None, view.to_dict())
         return xml.etree.ElementTree.tostring(root)
 
     def encode_helper(self, root, d):
@@ -286,11 +302,13 @@ class _XMLEncoder(_Encoder):
             e = xml.etree.ElementTree.SubElement(root, d['name'], **d['meta'])
 
         value = d['value']
+        contents = d['contents']
         if value is None:
-            e.text = " "
-        elif isinstance(value, list):
-            for v in value:
-                self.encode_helper(e, v)
+            if contents:
+                for v in contents:
+                    self.encode_helper(e, v)
+            else:
+                e.text = " "
         else:
             e.text = unicode(value)
         return e
@@ -306,11 +324,22 @@ class _XMLEncoder(_Encoder):
     content_type = 'application/xml'
 
 
+class _JSONEncoder(_Encoder):
+
+    def encode(self, view):
+        return json.dumps(view.to_dict())
+
+    def encode_error(self, e):
+        return json.dumps({'message': e.message, 'code': e.code})
+
+    content_type = 'application/json'
+
+
 class _HTMLEncoder(_Encoder):
 
     def encode(self, view):
         return self._get_jinja().get_template(
-            view.template).render(view.as_dictionary)
+            view.template).render(view.to_dict())
         
     def encode_error(self, exception):
         return "<h1>" + str(exception.code) + ":" + exception.message + "</h1>"
@@ -332,7 +361,7 @@ class _HTMLEncoder(_Encoder):
 class _Handler(webapp2.RequestHandler):
     """Base-class for request handlers."""
 
-    encoders = [_XMLEncoder(), _HTMLEncoder()]
+    encoders = [_XMLEncoder(), _HTMLEncoder(), _JSONEncoder()]
 
     def dispatch(self, **kwargs):
         
@@ -347,10 +376,13 @@ class _Handler(webapp2.RequestHandler):
 
     def select_encoder(self):
         accept = self.request.headers.get('Accept')
-        if not accept:
-            accept = self.request.get('format', 'application/xml')
+        if self.request.get('format'):
+            accept = self.request.get('format')
         for encoder in reversed(self.encoders):
             self.encoder = encoder
+            print self.encoder
+            print encoder.content_type
+            print accept
             if encoder.content_type == accept:
                 break
         self.response.headers['Content-Type'] = encoder.content_type
@@ -389,11 +421,11 @@ class _Handler(webapp2.RequestHandler):
                 value = value[-1]
             setattr(self.view, name, value)
         for name, input in self.view._inputs.iteritems():
-            if not input._optional:
+            if input._optional:
                 continue
             if getattr(self.view, name) is None:
                 raise _HTTPException(
-                    400, "No %s Specified" % (input.alias or name))
+                    400, "No %s specified" % (input._alias or name))
 
     def handle_error(self, exception):
         traceback.print_exc()
