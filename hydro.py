@@ -383,7 +383,7 @@ class _Handler(webapp2.RequestHandler):
             print self.encoder
             print encoder.content_type
             print accept
-            if encoder.content_type == accept:
+            if encoder.content_type in accept:
                 break
         self.response.headers['Content-Type'] = encoder.content_type
 
