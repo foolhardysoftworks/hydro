@@ -279,6 +279,10 @@ class _POST(_View):
 
 class _Encoder(object):
 
+    def __init__(self, content_type=None):
+        if content_type is not None:
+            self.content_type = content_type
+
     def encode(self, view):
         return str()
 
@@ -286,6 +290,29 @@ class _Encoder(object):
         return str()
 
     content_type = ''
+
+
+class _FieldEncoder(_Encoder):
+
+    def __init__(self, fieldname, **kwargs):
+        self.fieldname = fieldname
+        super(_FieldEncoder, self).__init__(**kwargs)
+
+    def encode(self, view):
+        return getattr(view, self.fieldname)
+
+
+class _FileEncoder(_Encoder):
+
+    def __init__(self, filename=None, **kwargs):
+        self.filename = filename
+        super(_FileEncoder, self).__init__(**kwargs)
+    
+    def encode(self, view):
+        file = open(self.filename or view.filename, 'r')
+        data = file.read()
+        file.close()
+        return data
 
 
 class _XMLEncoder(_Encoder):
@@ -402,6 +429,14 @@ class _Handler(webapp2.RequestHandler):
         if not view_class:
             raise _HTTPException(404)
         self.view = view_class()
+        accept = self.request.headers.get('Accept')
+        if self.request.get('format'):
+            accept = self.request.get('format')
+        for encoder in reversed(self.view.encoders):
+            self.encoder = encoder
+            if encoder.content_type in accept:
+                break
+        self.response.headers['Content-Type'] = encoder.content_type
         self.view.entity_name = entity_name
 
     def modify_view(self):
@@ -473,3 +508,10 @@ Meta = _Meta
 Output = _Output
 
 Inherited = _Inherited
+
+
+FieldEncoder = _FieldEncoder
+FileEncoder = _FileEncoder
+XMLEncoder = _XMLEncoder
+HTMLEncoder = _HTMLEncoder
+JSONEncoder = _JSONEncoder
