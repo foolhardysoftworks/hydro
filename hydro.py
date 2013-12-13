@@ -503,7 +503,8 @@ class _Handler(webapp2.RequestHandler):
             if input._optional or input._default is not None:
                 continue
             if getattr(self.view, name) is None:
-                message = "No %s specified" % input._alias or name
+                
+                message = "No %s specified" % (input._alias or name)
                 raise _HTTPException(
                     400, message)
 
