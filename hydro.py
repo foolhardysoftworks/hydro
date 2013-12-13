@@ -60,10 +60,11 @@ class _Field(object):
 
     _counter = 0
 
-    def __init__(self, default=None, alias=None):
+    def __init__(self, default=None, alias=None, simple_alias=None):
         self._default = default
         self._alias = alias
         self._index = self._counter
+        self._simple_alias = simple_alias
         _Field._counter += 1
 
     def __get__(self, parent, _=None):
@@ -91,8 +92,16 @@ class _Input(_Field):
                  
 class _Output(_Field):
     
-    def __init__(self, default=None, alias=None, multivalued=False, **kwargs):
-        super(_Output, self).__init__(default=default, alias=alias)
+    def __init__(self,
+                 default=None,
+                 alias=None,
+                 simple_alias=None,
+                 multivalued=False,
+                 **kwargs):
+        super(_Output, self).__init__(
+            default=default,
+            alias=alias,
+            simple_alias=simple_alias)
         self._multivalued = multivalued
         self._meta = {}
         self._meta.update(kwargs)
@@ -161,8 +170,21 @@ class _MetaView(type):
         super(_MetaView, cls).__init__(name, bases, cdict)
 
         path = cdict.get('path')
-        if path:
-            cls._mapping[path] = cls
+        method = cdict.get('method')
+        if path is None:
+            for base in bases:
+                if hasattr(base, 'path'):
+                    path = base.path
+                    break
+        if method is None:
+            for base in bases:
+                if hasattr(base, 'method'):
+                    method = base.method
+                    break
+        if path is not None:
+            if not method in cls._mapping:
+                cls._mapping[method] = {}
+            cls._mapping[method][path] = cls
 
         cls._inputs = collections.OrderedDict()
         cls._outputs = collections.OrderedDict()
@@ -206,6 +228,7 @@ class _View(object):
 
     __metaclass__ = _MetaView
 
+    method = 'GET'
     _mapping = {}
 
     def __init__(self, entity=None):
@@ -249,14 +272,36 @@ class _View(object):
                  'value': value, 'contents': []}
             f['meta'].update(output._meta)
             d['contents'].append(f)
-            self.to_dict_hook(d)
         return d
 
-    def to_dict_hook(self, d):
-        pass
+    def to_simple_dict(self):
+        d = {}
+        for name, output in self._outputs.iteritems():
+            value = getattr(self, name)
+            alias = output._simple_alias or output._alias or name
+            if isinstance(value, _Inherited):
+                value = value._resolve(output, self.entity)
+            if output._multivalued and value is not None:
+                for value_ in value:
+                    f = []
+                    if isinstance(value_, _View):
+                        f.append(value_.to_simple_json_dict())
+                    else:
+                        f.append(value_)
+                d[alias] = f
+                continue
+            if isinstance(value, _View):
+                d[alias] = value.to_simple_json_dict()
+                continue
+            d[alias] = value
+        return d
             
     def respond(self):
         pass
+
+    @property
+    def request(self):
+        return webapp2.get_request()
 
     @property
     def address(self):
@@ -267,14 +312,6 @@ class _View(object):
 
     def abort(self, *args, **kwargs):
         raise _HTTPException(*args, **kwargs)
-
-
-class _GET(_View):
-    _mapping = dict()
-
-
-class _POST(_View):
-    _mapping = dict()
 
 
 class _Encoder(object):
@@ -362,6 +399,17 @@ class _JSONEncoder(_Encoder):
     content_type = 'application/json'
 
 
+class _SimpleJSONEncoder(_Encoder):
+
+    def encode(self, view):
+        return json.dumps(view.to_simple_dict())
+
+    def encode_error(self, e):
+        return json.dumps({'message': e.message, 'code': e.code})
+
+    content_type = 'application/json'
+
+
 class _HTMLEncoder(_Encoder):
 
     def encode(self, view):
@@ -407,9 +455,6 @@ class _Handler(webapp2.RequestHandler):
             accept = self.request.get('format')
         for encoder in reversed(self.encoders):
             self.encoder = encoder
-            print self.encoder
-            print encoder.content_type
-            print accept
             if encoder.content_type in accept:
                 break
         self.response.headers['Content-Type'] = encoder.content_type
@@ -420,13 +465,9 @@ class _Handler(webapp2.RequestHandler):
                 view_name = "/"
             else:
                 raise _HTTPException(404)
-        if self.request.method == 'GET':
-            view_class = _GET._mapping.get(view_name)
-        elif self.request.method == 'POST':
-            view_class = _POST._mapping.get(view_name)
-        else:
-            raise _HTTPException(405)
-        if not view_class:
+
+        view_class = _View._mapping.get(self.request.method, {}).get(view_name)
+        if view_class is None:
             raise _HTTPException(404)
         self.view = view_class()
         accept = self.request.headers.get('Accept')
@@ -446,21 +487,25 @@ class _Handler(webapp2.RequestHandler):
                 modifications[key] = []
             modifications[key].append(value)
         for name, input in self.view._inputs.iteritems():
+            if input._multivalued and input._default is None:
+                setattr(self.view, name, [])
             if not (input._alias or name) in modifications:
                 continue
             try:
-                value = [input._coerce(v) for v in modifications[name]]
+                value = [input._coerce(v) for v in modifications[
+                    input._alias or name]]
             except (TypeError, ValueError):
                 continue
             if not input._multivalued:
                 value = value[-1]
             setattr(self.view, name, value)
         for name, input in self.view._inputs.iteritems():
-            if input._optional:
+            if input._optional or input._default is not None:
                 continue
             if getattr(self.view, name) is None:
+                message = "No %s specified" % input._alias or name
                 raise _HTTPException(
-                    400, "No %s specified" % (input._alias or name))
+                    400, message)
 
     def handle_error(self, exception):
         traceback.print_exc()
@@ -468,6 +513,7 @@ class _Handler(webapp2.RequestHandler):
             self.response.set_status(exception.code, exception.message)
             self.response.write(
                 self.encoder.encode_error(exception))
+            print exception.message
         else:
             raise exception
 
@@ -495,8 +541,7 @@ class Hydro(webapp2.WSGIApplication):
         )
 
 
-GET = _GET
-POST = _POST
+Handler = _View
 
 Input = _Input
 String = _String
@@ -505,13 +550,14 @@ Float = _Float
 Boolean = _Boolean
 
 Meta = _Meta
+
 Output = _Output
-
 Inherited = _Inherited
-
 
 FieldEncoder = _FieldEncoder
 FileEncoder = _FileEncoder
 XMLEncoder = _XMLEncoder
 HTMLEncoder = _HTMLEncoder
 JSONEncoder = _JSONEncoder
+
+SimpleJSONEncoder = _SimpleJSONEncoder
