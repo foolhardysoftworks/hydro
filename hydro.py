@@ -255,6 +255,8 @@ class _View(object):
                 for value_ in value:
                     if isinstance(value_, _View):
                         f = value_.to_dict()
+                        f['name'] = output._alias or name
+                        f['meta'].update(output._meta)
                     else:
                         f = {'name': output._alias or name, 'meta': {},
                              'value': value_, 'contents': []}
