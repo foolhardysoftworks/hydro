@@ -234,6 +234,11 @@ class _View(object):
     def __init__(self, entity=None):
         self._entity = entity
 
+
+    @property
+    def headers(self):
+        return self._webapp2_response.headers
+
     def to_dict(self):
         d = {'name': 'resource', 'meta': {}, 'value': None, 'contents': []}
         if hasattr(self, 'name'):
@@ -297,13 +302,15 @@ class _View(object):
                 continue
             d[alias] = value
         return d
-            
-    def respond(self):
+
+    def pre_response_hook(self):
         pass
 
-    @property
-    def request(self):
-        return webapp2.get_request()
+    def post_response_hook(self):
+        pass
+
+    def response(self):
+        pass
 
     @property
     def address(self):
@@ -446,7 +453,9 @@ class _Handler(webapp2.RequestHandler):
         try:
             self.create_view(**self.request.route_kwargs)
             self.modify_view()
-            self.view.respond()
+            self.view.pre_response_hook()
+            self.view.response()
+            self.view.post_response_hook()
             self.response.write(self.encoder.encode(self.view))
         except _HTTPException as e:
             self.handle_error(e)
@@ -481,6 +490,8 @@ class _Handler(webapp2.RequestHandler):
                 break
         self.response.headers['Content-Type'] = encoder.content_type
         self.view.entity_name = entity_name
+        self.view._webapp2_request = self.request
+        self.view._webapp2_response = self.response
 
     def modify_view(self):
         modifications = {}
