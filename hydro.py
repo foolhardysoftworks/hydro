@@ -165,26 +165,55 @@ class _Integer(_Input):
 
 class _MetaView(type):
 
+    def _get_paths(cls, name, bases, cdict):
+
+        paths = cdict.get('paths')
+        if isinstance(paths, (list, tuple)) and paths:
+            return paths
+
+        path = cdict.get('path')
+        if path:
+            return [path]
+    
+        for base in bases:
+            paths = getattr(base, 'paths', None)
+            if isinstance(paths, (list, tuple)) and paths:
+                return paths
+            path = getattr(base, 'path', None)
+            if path:
+                return [path]
+
+    def _get_routes(cls, name, bases, cdict):
+
+        routes = []
+        paths = cls._get_paths(name, bases, cdict)
+        for path in paths:
+            route = webapp2.Route(path)
+            route.endpoint_class = cls
+            routes.append(route)
+
+        return routes
+
+    def _get_method(cls, name, bases, cdict):
+        
+        method = cdict.get('method')
+        if method is not None:
+            return method
+        for base in bases:
+            method = getattr(base, 'method', None)
+            if method is not None:
+                return method
+        return 'GET'
+                    
     def __init__(cls, name, bases, cdict):
 
         super(_MetaView, cls).__init__(name, bases, cdict)
-
-        path = cdict.get('path')
-        method = cdict.get('method')
-        if path is None:
-            for base in bases:
-                if hasattr(base, 'path'):
-                    path = base.path
-                    break
-        if method is None:
-            for base in bases:
-                if hasattr(base, 'method'):
-                    method = base.method
-                    break
-        if path is not None:
-            if not method in cls._mapping:
-                cls._mapping[method] = {}
-            cls._mapping[method][path] = cls
+        
+        method = cls._get_method(name, bases, cdict)
+        routes = cls._get_routes(name, bases, cdict)
+        if not method in cls._routes_by_method:
+            cls._routes_by_method[method] = []
+        cls._routes_by_method[method].extend(routes)
 
         cls._inputs = collections.OrderedDict()
         cls._outputs = collections.OrderedDict()
@@ -229,11 +258,11 @@ class _View(object):
     __metaclass__ = _MetaView
 
     method = 'GET'
-    _mapping = {}
+
+    _routes_by_method = {}
 
     def __init__(self, entity=None):
         self._entity = entity
-
 
     @property
     def headers(self):
@@ -328,15 +357,16 @@ class _Encoder(object):
     def __init__(self, content_type=None):
         if content_type is not None:
             self.content_type = content_type
+    
+    def encode(self, endpoint=None):
+        if endpoint is None:
+            return '<h1>Hydro Rocks!</h1>'
 
-    def encode(self, view):
-        return str()
+    def encoder_error(self, exception):
+        return '<h1>An Error has Occured</h1>'
 
-    def encode_error(self, exception):
-        return str()
-
-    content_type = ''
-
+    content_type = 'text/html'
+    
 
 class _FieldEncoder(_Encoder):
 
@@ -445,53 +475,55 @@ class _HTMLEncoder(_Encoder):
 class _Handler(webapp2.RequestHandler):
     """Base-class for request handlers."""
 
-    encoders = [_XMLEncoder(), _HTMLEncoder(), _JSONEncoder()]
+    _routers_by_method = {}
 
     def dispatch(self, **kwargs):
         
-        self.select_encoder()
+        self._endpoint = None
+        if not self.request.method in self._routers_by_method:
+            routes = _View._routes_by_method.get(self.request.method, [])
+            router = webapp2.Router(routes)
+            self._routers_by_method[self.request.method] = router
+
+        router = self._routers_by_method[self.request.method]
+
         try:
-            self.create_view(**self.request.route_kwargs)
+
+            # TODO: Exception catching
+            (route, args, kwargs) = router.match(self.request)
+
+            self._endpoint = route.endpoint_class()
+            self._endpoint._webapp2_request = self.request
+            self._endpoint._webapp2_response = self.response
+
+            self.create_view()
             self.modify_view()
             self.view.pre_response_hook()
             self.view.response()
             self.view.post_response_hook()
-            self.response.write(self.encoder.encode(self.view))
+            encoder = self._get_encoder()
+            self.response.write(encoder.encode(self._endpoint))
         except _HTTPException as e:
             self.handle_error(e)
 
-    def select_encoder(self):
+    def _get_encoder(self):
         accept = self.request.headers.get('Accept')
-        if self.request.get('format'):
-            accept = self.request.get('format')
-        for encoder in reversed(self.encoders):
-            self.encoder = encoder
-            if encoder.content_type in accept:
-                break
-        self.response.headers['Content-Type'] = encoder.content_type
-
-    def create_view(self, view_name=None, entity_name=None):
-        if not view_name:
-            if self.request.path == '/':
-                view_name = "/"
+        encoders = []
+        if self._endpoint is not None:
+            encoder = getattr(self._endpoint, 'encoder')
+            if encoder is not None:
+                encoders.append(encoder)
             else:
-                raise _HTTPException(404)
-
-        view_class = _View._mapping.get(self.request.method, {}).get(view_name)
-        if view_class is None:
-            raise _HTTPException(404)
-        self.view = view_class()
-        accept = self.request.headers.get('Accept')
-        if self.request.get('format'):
-            accept = self.request.get('format')
-        for encoder in reversed(self.view.encoders):
-            self.encoder = encoder
+                encoders = getattr(self._endpoint, 'encoders', [])
+        if not encoders:
+            encoders = [_Encoder()]
+                    
+        for encoder in reversed(encoders):
             if encoder.content_type in accept:
                 break
+
         self.response.headers['Content-Type'] = encoder.content_type
-        self.view.entity_name = entity_name
-        self.view._webapp2_request = self.request
-        self.view._webapp2_response = self.response
+        return encoder
 
     def modify_view(self):
         modifications = {}
@@ -524,9 +556,10 @@ class _Handler(webapp2.RequestHandler):
     def handle_error(self, exception):
         traceback.print_exc()
         if isinstance(exception, _HTTPException):
+            encoder = self.get_encoder()
+            body = encoder.encode_error(exception)
+            self.response.write(body)
             self.response.set_status(exception.code, exception.message)
-            self.response.write(
-                self.encoder.encode_error(exception))
             print exception.message
         else:
             raise exception
@@ -545,10 +578,6 @@ class Hydro(webapp2.WSGIApplication):
 
         super(Hydro, self).__init__(
             [
-                webapp2.Route('/', _Handler),
-                webapp2.Route('/<view_name>', _Handler),
-                webapp2.Route('/<view_name>/', _Handler),
-                webapp2.Route('/<view_name>/<entity_name>', _Handler),
                 webapp2.Route('<:.*>', _Handler),
             ],
             config=kwargs,
