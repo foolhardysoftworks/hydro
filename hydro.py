@@ -8,6 +8,8 @@ import copy
 import collections
 import webapp2
 import json
+import random
+import base64
 import xml.etree.ElementTree
 
 
@@ -35,20 +37,22 @@ class _HTTPException(Exception):
     message = "An unknown error has occured."
 
     message_map = {
+        400: "Client Error",
         403: "Unauthorized",
         404: "Resource Not Found",
         499: "Unknown client error."
     }
 
-    def __init__(self, code=None, message=None, **kwargs):
-        if code is not None:
-            self.code = code
-        if message is not None:
-            self.message = message
+    def __init__(self, _code=None, _message=None, **kwargs):
+        if _code is not None:
+            self.code = _code
+        if _message is not None:
+            self.message = _message
         elif self.code in self.message_map:
             self.message = self.message_map[self.code]
+        self.other = {}
         for key, val in kwargs.iteritems():
-            setattr(self, key, val)
+            self.other[key] = val
 
 
 class _Localized(object):
@@ -80,9 +84,9 @@ class _Field(object):
 
 class _Input(_Field):
     
-    def __init__(self, default=None, optional=False,
-                 multivalued=False, **kwargs):
-        self._optional = optional
+    def __init__(self, default=None,
+                 multivalued=False,
+                 **kwargs):
         self._multivalued = multivalued
         super(_Input, self).__init__(default=default, **kwargs)
 
@@ -183,6 +187,8 @@ class _MetaView(type):
             if path:
                 return [path]
 
+        return []
+
     def _get_routes(cls, name, bases, cdict):
 
         routes = []
@@ -194,26 +200,37 @@ class _MetaView(type):
 
         return routes
 
-    def _get_method(cls, name, bases, cdict):
+    def _get_methods(cls, name, bases, cdict):
         
         method = cdict.get('method')
         if method is not None:
-            return method
+            return [method]
+        methods = cdict.get('methods')
+        if methods is not None:
+            return methods
+            
         for base in bases:
             method = getattr(base, 'method', None)
             if method is not None:
-                return method
-        return 'GET'
+                return [method]
+            methods = getattr(base, 'methods', None)
+            if methods is not None:
+                return methods
+        return []
                     
     def __init__(cls, name, bases, cdict):
 
         super(_MetaView, cls).__init__(name, bases, cdict)
         
-        method = cls._get_method(name, bases, cdict)
+        methods = cls._get_methods(name, bases, cdict)
+
         routes = cls._get_routes(name, bases, cdict)
-        if not method in cls._routes_by_method:
-            cls._routes_by_method[method] = []
-        cls._routes_by_method[method].extend(routes)
+        for method in methods:
+            print method
+            print routes
+            if not method in cls._routes_by_method:
+                cls._routes_by_method[method] = []
+            cls._routes_by_method[method].extend(routes)
 
         cls._inputs = collections.OrderedDict()
         cls._outputs = collections.OrderedDict()
@@ -257,16 +274,24 @@ class _View(object):
 
     __metaclass__ = _MetaView
 
-    method = 'GET'
-
     _routes_by_method = {}
+    headers = {}
 
     def __init__(self, entity=None):
         self._entity = entity
+        self.response_headers = {}
+        self.status_code = 200
+        self.status_message = None
 
-    @property
-    def headers(self):
-        return self._webapp2_response.headers
+    def get_path(self):
+        import urllib
+        return urllib.unquote(webapp2.get_request().path)
+
+    def set_header(self, key, value):
+        self._webapp2_response.headers[key] = value
+
+    def set_status(self, code, message=None):
+        self._webapp2_response.set_status(code, message)
 
     def to_dict(self):
         d = {'name': 'resource', 'meta': {}, 'value': None, 'contents': []}
@@ -351,6 +376,13 @@ class _View(object):
     def abort(self, *args, **kwargs):
         raise _HTTPException(*args, **kwargs)
 
+    def generate_random_id(self, bits=128):
+        id_long = random.getrandbits(bits)
+        id_hex_raw = '%x' % id_long
+        id_hex_padded = '0' * (bits / 4 - len(id_hex_raw)) + id_hex_raw
+        id_bs = id_hex_padded.decode('hex')
+        return base64.urlsafe_b64encode(id_bs)
+
 
 class _Encoder(object):
 
@@ -361,8 +393,9 @@ class _Encoder(object):
     def encode(self, endpoint=None):
         if endpoint is None:
             return '<h1>Hydro Rocks!</h1>'
+        return '<h1>What up?</h1>'
 
-    def encoder_error(self, exception):
+    def encode_error(self, exception):
         return '<h1>An Error has Occured</h1>'
 
     content_type = 'text/html'
@@ -427,7 +460,7 @@ class _XMLEncoder(_Encoder):
     content_type = 'application/xml'
 
 
-class _JSONEncoder(_Encoder):
+class _AdvancedJSONEncoder(_Encoder):
 
     def encode(self, view):
         return json.dumps(view.to_dict())
@@ -438,13 +471,13 @@ class _JSONEncoder(_Encoder):
     content_type = 'application/json'
 
 
-class _SimpleJSONEncoder(_Encoder):
+class _JSONEncoder(_Encoder):
 
     def encode(self, view):
         return json.dumps(view.to_simple_dict())
 
     def encode_error(self, e):
-        return json.dumps({'message': e.message, 'code': e.code})
+        return json.dumps(e.other)
 
     content_type = 'application/json'
 
@@ -485,23 +518,28 @@ class _Handler(webapp2.RequestHandler):
             router = webapp2.Router(routes)
             self._routers_by_method[self.request.method] = router
 
+
         router = self._routers_by_method[self.request.method]
 
         try:
 
             # TODO: Exception catching
             (route, args, kwargs) = router.match(self.request)
-
             self._endpoint = route.endpoint_class()
             self._endpoint._webapp2_request = self.request
             self._endpoint._webapp2_response = self.response
 
-            self.create_view()
-            self.modify_view()
-            self.view.pre_response_hook()
-            self.view.response()
-            self.view.post_response_hook()
+            if self._endpoint.headers is not None:
+                for key in self._endpoint.headers:
+                    self.response.headers[key] = self._endpoint.headers[key]
+
+            self.modify_view(*args, **kwargs)
+            self._endpoint.pre_response_hook()
+            self._endpoint.response()
+            self._endpoint.post_response_hook()
+    
             encoder = self._get_encoder()
+
             self.response.write(encoder.encode(self._endpoint))
         except _HTTPException as e:
             self.handle_error(e)
@@ -510,7 +548,7 @@ class _Handler(webapp2.RequestHandler):
         accept = self.request.headers.get('Accept')
         encoders = []
         if self._endpoint is not None:
-            encoder = getattr(self._endpoint, 'encoder')
+            encoder = getattr(self._endpoint, 'encoder', None)
             if encoder is not None:
                 encoders.append(encoder)
             else:
@@ -525,38 +563,42 @@ class _Handler(webapp2.RequestHandler):
         self.response.headers['Content-Type'] = encoder.content_type
         return encoder
 
-    def modify_view(self):
+    def modify_view(self, *args, **kwargs):
         modifications = {}
         for key, value in self.request.params.iteritems():
             if key not in modifications:
                 modifications[key] = []
             modifications[key].append(value)
-        for name, input in self.view._inputs.iteritems():
+        for key, value in kwargs.iteritems():
+            if key not in modifications:
+                modifications[key] = []
+            modifications[key].append(value)
+        for name, input in self._endpoint._inputs.iteritems():
             if input._multivalued and input._default is None:
-                setattr(self.view, name, [])
+                setattr(self._endpoint, name, [])
             if not (input._alias or name) in modifications:
                 continue
             try:
                 value = [input._coerce(v) for v in modifications[
                     input._alias or name]]
             except (TypeError, ValueError):
-                continue
+                raise _HTTPException(400, "Invalid %s" % (
+                    input._alias or name))
             if not input._multivalued:
                 value = value[-1]
-            setattr(self.view, name, value)
-        for name, input in self.view._inputs.iteritems():
-            if input._optional or input._default is not None:
-                continue
-            if getattr(self.view, name) is None:
-                
-                message = "No %s specified" % (input._alias or name)
-                raise _HTTPException(
-                    400, message)
+            setattr(self._endpoint, name, value)
 
     def handle_error(self, exception):
+
+        if self._endpoint:
+            for key in self._endpoint.response_headers:
+                self.response.headers[key] = (
+                    self._endpoint.response_headers[key])
+
+
         traceback.print_exc()
         if isinstance(exception, _HTTPException):
-            encoder = self.get_encoder()
+            encoder = self._get_encoder()
             body = encoder.encode_error(exception)
             self.response.write(body)
             self.response.set_status(exception.code, exception.message)
@@ -585,6 +627,7 @@ class Hydro(webapp2.WSGIApplication):
 
 
 Handler = _View
+Resource = _View
 
 Input = _Input
 String = _String
@@ -603,4 +646,4 @@ XMLEncoder = _XMLEncoder
 HTMLEncoder = _HTMLEncoder
 JSONEncoder = _JSONEncoder
 
-SimpleJSONEncoder = _SimpleJSONEncoder
+
