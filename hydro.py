@@ -557,7 +557,7 @@ class _Handler(webapp2.RequestHandler):
             encoders = [_Encoder()]
                     
         for encoder in reversed(encoders):
-            if encoder.content_type in accept:
+            if accept and encoder.content_type in accept:
                 break
 
         self.response.headers['Content-Type'] = encoder.content_type
