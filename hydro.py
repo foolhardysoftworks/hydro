@@ -289,8 +289,8 @@ class _View(object):
             if isinstance(value, _Inherited):
                 value = value._resolve(output, self.entity)
             if output._multivalued and value is not None:
-                for value_ in value:
-                    f = []
+                f = []
+                for value_ in value:                    
                     if isinstance(value_, _View):
                         f.append(value_.to_simple_json_dict())
                     else:
