@@ -128,6 +128,8 @@ class _Inherited(object):
 class _String(_Input):
     
     def _coerce(self, value):
+        if isinstance(value, basestring):
+            return value
         return str(value)
 
         
@@ -459,6 +461,7 @@ class _Handler(webapp2.RequestHandler):
             self.response.write(self.encoder.encode(self.view))
         except _HTTPException as e:
             self.handle_error(e)
+        return self.response
 
     def select_encoder(self):
         accept = self.request.headers.get('Accept')
@@ -516,7 +519,6 @@ class _Handler(webapp2.RequestHandler):
             if input._optional or input._default is not None:
                 continue
             if getattr(self.view, name) is None:
-                
                 message = "No %s specified" % (input._alias or name)
                 raise _HTTPException(
                     400, message)
@@ -525,9 +527,8 @@ class _Handler(webapp2.RequestHandler):
         traceback.print_exc()
         if isinstance(exception, _HTTPException):
             self.response.set_status(exception.code, exception.message)
-            self.response.write(
+            self.response.out.write(
                 self.encoder.encode_error(exception))
-            print exception.message
         else:
             raise exception
 
@@ -568,10 +569,10 @@ Meta = _Meta
 Output = _Output
 Inherited = _Inherited
 
+Encoder = _Encoder
 FieldEncoder = _FieldEncoder
 FileEncoder = _FileEncoder
 XMLEncoder = _XMLEncoder
 HTMLEncoder = _HTMLEncoder
 JSONEncoder = _JSONEncoder
-
 SimpleJSONEncoder = _SimpleJSONEncoder
