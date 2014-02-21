@@ -450,7 +450,7 @@ class _Handler(webapp2.RequestHandler):
     encoders = [_XMLEncoder(), _HTMLEncoder(), _JSONEncoder()]
 
     def dispatch(self, **kwargs):
-        
+        self.response.headers['Access-Control-Allow-Origin'] = '*'
         self.select_encoder()
         try:
             self.create_view(**self.request.route_kwargs)
