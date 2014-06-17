@@ -467,6 +467,10 @@ class _Handler(webapp2.RequestHandler):
         accept = self.request.headers.get('Accept')
         if self.request.get('format'):
             accept = self.request.get('format')
+        if not accept:
+            accept = 'application/json'
+        if not self.encoders:
+            self.encoders = []
         for encoder in reversed(self.encoders):
             self.encoder = encoder
             if encoder.content_type in accept:
@@ -487,6 +491,8 @@ class _Handler(webapp2.RequestHandler):
         accept = self.request.headers.get('Accept')
         if self.request.get('format'):
             accept = self.request.get('format')
+        if not accept:
+            accept = 'application/json'
         for encoder in reversed(self.view.encoders):
             self.encoder = encoder
             if encoder.content_type in accept:
